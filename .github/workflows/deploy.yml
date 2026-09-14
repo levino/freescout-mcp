@@ -1,12 +1,8 @@
-# Push auf main -> Binary und Module bauen -> Ergebnis auf den Branch
-# `production-dist` veröffentlichen. Kein Image, keine Registry: der Cluster
-# darf nur die GitHub App benutzen, und GHCR lässt eine App-Installation keine
-# privaten Pakete lesen. Git schon.
+# Kein Image, keine Registry: der Cluster darf nur die GitHub App benutzen, und
+# GHCR lässt eine App-Installation keine privaten Pakete lesen. Git schon.
 #
-# Der Init-Container des FreeScout-Pods klont diesen Branch beim Start. Gepinnt
-# wird der Commit in `levino/server-config`, `apps/freescout/workloads.yaml`
-# (Annotation `levinkeller.de/dist-commit`) — dieser Workflow schreibt den
-# Commit nur in die Job-Zusammenfassung.
+# Gepinnt wird der Dist-Commit in `levino/server-config`,
+# `apps/freescout/workloads.yaml` (`levinkeller.de/dist-commit`).
 name: Deploy
 
 on:
@@ -37,10 +33,7 @@ jobs:
           GOARCH: arm64
           CGO_ENABLED: "0"
         run: |
-          mkdir -p dist/modules dist/deploy
-          go build -trimpath -ldflags "-s -w" -o dist/mcp-server ./server
-          cp -R modules/Mcp modules/Zitadel dist/modules/
-          cp deploy/activate-modules.sh dist/deploy/activate-modules.sh
+          deploy/build-dist.sh dist
           file dist/mcp-server || true
 
       - name: Als Branch `production-dist` veröffentlichen

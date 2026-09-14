@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Brings up the end-to-end stack, seeds it, starts the MCP server and the fake
-# login provider inside the FreeScout container, and runs the test against it.
-#
 #   ci/e2e.sh          full run, tears the stack down afterwards
 #   ci/e2e.sh up       bring the stack up and leave it running
 #   ci/e2e.sh test     run the test against a stack that is already up
@@ -20,22 +17,21 @@ MCP_URL="http://127.0.0.1:8081"
 OIDC_URL="http://127.0.0.1:8082"
 
 stage() {
-  # Empty the staging directories without removing them: a directory that is
-  # deleted and recreated can end up bind-mounted as its old, gone inode, and
-  # the container then sees nothing in it.
+  # Empty these without removing them: a directory that is deleted and
+  # recreated can end up bind-mounted as its old, gone inode.
   mkdir -p "$STAGE/Modules" "$STAGE/bin" "$STAGE/custom-scripts"
   rm -rf "$STAGE/Modules"/* "$STAGE/bin"/* "$STAGE/custom-scripts"/*
-  # Copies, not the repository: the container chowns what it mounts.
-  cp -R ../modules/Mcp ../modules/Zitadel "$STAGE/Modules/"
+
+  # Everything comes out of the published tree, so a file missing from the dist
+  # fails here instead of in the cluster.
+  ../deploy/build-dist.sh "$STAGE/dist" "e2e"
+
+  cp -R "$STAGE/dist/modules/Mcp" "$STAGE/dist/modules/Zitadel" "$STAGE/Modules/"
   chmod -R a+rX "$STAGE/Modules"
-  # Start hooks, run in this order by the image: install the modules the way the
-  # cluster's init container does, then activate them with the very script that
-  # ships to production.
   cp install-modules.sh "$STAGE/custom-scripts/00-install-modules.sh"
-  cp ../deploy/activate-modules.sh "$STAGE/custom-scripts/10-activate-modules.sh"
+  cp "$STAGE/dist/deploy/activate-modules.sh" "$STAGE/custom-scripts/10-activate-modules.sh"
   chmod -R a+rx "$STAGE/custom-scripts"
-  # Static binaries for the container's Alpine userland, host architecture.
-  CGO_ENABLED=0 go build -C .. -o "$STAGE/bin/mcp-server" ./server
+  cp "$STAGE/dist/mcp-server" "$STAGE/bin/mcp-server"
   CGO_ENABLED=0 go build -C .. -o "$STAGE/bin/fake-oidc" ./ci/fake-oidc
 }
 
@@ -56,7 +52,6 @@ wait_for() {
 up() {
   stage
   "${COMPOSE[@]}" up -d
-  # FreeScout's first boot creates the schema and warms the assets.
   wait_for "$FREESCOUT_URL/login" "freescout" 600
 
   echo "seeding"
