@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 func toolDefs() []map[string]any {
@@ -81,6 +84,16 @@ func toolDefs() []map[string]any {
 			},
 		},
 		{
+			"name": "get_attachment",
+			"description": "Download one attachment. Images come back as an image, text as text, " +
+				"anything else as a file the client can save. Attachment ids come from get_conversation.",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"id": num("Attachment id from get_conversation.")},
+				"required":   []string{"id"},
+			},
+		},
+		{
 			"name":        "assign_conversation",
 			"description": "Assign a conversation to a colleague, or leave assignee_email empty to unassign.",
 			"inputSchema": map[string]any{
@@ -153,6 +166,16 @@ func (a *App) dispatchTool(name string, rawArgs json.RawMessage, email string) m
 		}
 		return a.toolResult(a.bridge.post("conversations/"+strconv.FormatInt(args.ID, 10)+"/reply", payload, email))
 
+	case "get_attachment":
+		if args.ID <= 0 {
+			return toolError("id is required")
+		}
+		payload, err := a.bridge.get("attachments/"+strconv.FormatInt(args.ID, 10), nil, email)
+		if err != nil {
+			return a.toolResult(nil, err)
+		}
+		return attachmentResult(payload)
+
 	case "add_note":
 		if args.ID <= 0 || strings.TrimSpace(args.Body) == "" {
 			return toolError("id and body are required")
@@ -202,4 +225,62 @@ func toolError(message string) map[string]any {
 		"isError": true,
 		"content": []map[string]any{{"type": "text", "text": message}},
 	}
+}
+
+func attachmentResult(payload map[string]any) map[string]any {
+	attachment, _ := payload["attachment"].(map[string]any)
+	if attachment == nil {
+		return toolError("the helpdesk returned no attachment")
+	}
+	data, _ := attachment["base64"].(string)
+	mime, _ := attachment["mime_type"].(string)
+	name, _ := attachment["name"].(string)
+	if data == "" {
+		return toolError("the attachment came back empty")
+	}
+
+	if strings.HasPrefix(mime, "image/") {
+		return map[string]any{"content": []map[string]any{
+			{"type": "text", "text": name},
+			{"type": "image", "data": data, "mimeType": mime},
+		}}
+	}
+
+	if isTextual(mime) {
+		decoded, err := base64.StdEncoding.DecodeString(data)
+		if err == nil && utf8.Valid(decoded) {
+			return map[string]any{"content": []map[string]any{
+				{"type": "text", "text": name + "\n\n" + string(decoded)},
+			}}
+		}
+	}
+
+	id, _ := attachment["id"].(float64)
+	return map[string]any{"content": []map[string]any{
+		{"type": "text", "text": name},
+		{"type": "resource", "resource": map[string]any{
+			"uri":      fmt.Sprintf("freescout://attachment/%d", int64(id)),
+			"name":     name,
+			"mimeType": mimeOrDefault(mime),
+			"blob":     data,
+		}},
+	}}
+}
+
+func isTextual(mime string) bool {
+	if strings.HasPrefix(mime, "text/") {
+		return true
+	}
+	switch mime {
+	case "application/json", "application/xml", "application/x-yaml", "application/csv":
+		return true
+	}
+	return false
+}
+
+func mimeOrDefault(mime string) string {
+	if mime == "" {
+		return "application/octet-stream"
+	}
+	return mime
 }

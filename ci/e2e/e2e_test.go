@@ -55,6 +55,10 @@ type seed struct {
 	CustomerEmail  string `json:"customer_email"`
 	AdminEmail     string `json:"admin_email"`
 	ColleagueEmail string `json:"colleague_email"`
+	ThreadID       int    `json:"thread_id"`
+	TextAttachment int    `json:"text_attachment_id"`
+	ImgAttachment  int    `json:"image_attachment_id"`
+	ImageBase64    string `json:"image_base64"`
 }
 
 var (
@@ -237,6 +241,22 @@ func callTool(t *testing.T, name string, args map[string]any) string {
 		t.Fatalf("%s reported an error: %s", name, text)
 	}
 	return text
+}
+
+func callToolRaw(t *testing.T, name string, args map[string]any) map[string]any {
+	t.Helper()
+	status, body := rpc(t, connect(t), map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": name, "arguments": args},
+	})
+	if status != 200 {
+		t.Fatalf("%s: HTTP %d", name, status)
+	}
+	result, _ := body["result"].(map[string]any)
+	if result == nil {
+		t.Fatalf("%s: no result in %v", name, body)
+	}
+	return result
 }
 
 func callToolExpectingError(t *testing.T, name string, args map[string]any) string {
@@ -601,10 +621,58 @@ func TestWebLoginGoesThroughZitadel(t *testing.T) {
 	}
 }
 
+func TestAttachmentsAreListedAndDownloadable(t *testing.T) {
+	fixture := seeded(t)
+
+	conversation := callTool(t, "get_conversation", map[string]any{"id": fixture.ConversationID})
+	for _, want := range []string{"angebot.txt", "dach.png", "image/png"} {
+		if !strings.Contains(conversation, want) {
+			t.Fatalf("get_conversation does not list %q: %s", want, truncate(conversation))
+		}
+	}
+
+	text := callToolRaw(t, "get_attachment", map[string]any{"id": fixture.TextAttachment})
+	textContent := contentOf(t, text)
+	if len(textContent) != 1 || textContent[0]["type"] != "text" {
+		t.Fatalf("the text file did not come back as text: %v", text)
+	}
+	if body, _ := textContent[0]["text"].(string); !strings.Contains(body, "Angebot über 5 m²") {
+		t.Fatalf("the text file lost its content: %q", body)
+	}
+
+	image := callToolRaw(t, "get_attachment", map[string]any{"id": fixture.ImgAttachment})
+	imageContent := contentOf(t, image)
+	if len(imageContent) != 2 || imageContent[1]["type"] != "image" {
+		t.Fatalf("the image did not come back as an image: %v", image)
+	}
+	if data, _ := imageContent[1]["data"].(string); data != fixture.ImageBase64 {
+		t.Fatalf("the image bytes changed on the way")
+	}
+	if mime, _ := imageContent[1]["mimeType"].(string); mime != "image/png" {
+		t.Fatalf("wrong mime type: %q", mime)
+	}
+
+	missing := callToolRaw(t, "get_attachment", map[string]any{"id": 9999})
+	if missing["isError"] != true {
+		t.Fatalf("an unknown attachment was not an error: %v", missing)
+	}
+}
+
+func contentOf(t *testing.T, result map[string]any) []map[string]any {
+	t.Helper()
+	raw, _ := result["content"].([]any)
+	out := make([]map[string]any, 0, len(raw))
+	for _, entry := range raw {
+		item, _ := entry.(map[string]any)
+		out = append(out, item)
+	}
+	return out
+}
+
 func TestSettingsPageShowsTheEndpoint(t *testing.T) {
 	browser := signedInBrowser(t)
 
-	res, err := browser.Get(freescoutURL + "/settings?section=mcp")
+	res, err := browser.Get(freescoutURL + "/app-settings/mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,13 +693,13 @@ func TestSettingsPageShowsTheEndpoint(t *testing.T) {
 		t.Fatalf("the page does not report the bridge token: %s", truncate(page))
 	}
 
-	sidebar, err := browser.Get(freescoutURL + "/settings")
+	sidebar, err := browser.Get(freescoutURL + "/app-settings")
 	if err != nil {
 		t.Fatal(err)
 	}
 	sidebarBody, _ := io.ReadAll(sidebar.Body)
 	sidebar.Body.Close()
-	if !strings.Contains(string(sidebarBody), "section=mcp") {
+	if !strings.Contains(string(sidebarBody), "app-settings/mcp") {
 		t.Fatalf("the settings menu does not link the section: %s", truncate(string(sidebarBody)))
 	}
 }

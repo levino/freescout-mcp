@@ -14,6 +14,7 @@ require '/www/html/vendor/autoload.php';
 $app = require '/www/html/bootstrap/app.php';
 $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
 
+use App\Attachment;
 use App\Conversation;
 use App\Customer;
 use App\Mailbox;
@@ -99,12 +100,44 @@ $thread->created_at = $now;
 $thread->updated_at = $now;
 $thread->save();
 
+$textAttachment = Attachment::create(
+    'angebot.txt',
+    'text/plain',
+    Attachment::TYPE_TEXT,
+    "Angebot über 5 m² Dachfläche\nGrüße aus Rössing\n",
+    null,
+    false,
+    $thread->id,
+    null
+);
+
+$pngBytes = base64_decode(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+);
+$imageAttachment = Attachment::create(
+    'dach.png',
+    'image/png',
+    Attachment::TYPE_IMAGE,
+    $pngBytes,
+    null,
+    false,
+    $thread->id,
+    null
+);
+
+$thread->has_attachments = true;
+$thread->save();
+
 $mailbox->updateFoldersCounters();
 
 echo json_encode([
-    'mailbox_id'      => $mailbox->id,
-    'conversation_id' => $conversation->id,
-    'customer_email'  => 'kundin@example.com',
-    'admin_email'     => $admin->email,
-    'colleague_email' => $colleague->email,
+    'mailbox_id'          => $mailbox->id,
+    'conversation_id'     => $conversation->id,
+    'customer_email'      => 'kundin@example.com',
+    'admin_email'         => $admin->email,
+    'colleague_email'     => $colleague->email,
+    'thread_id'           => $thread->id,
+    'text_attachment_id'  => $textAttachment ? $textAttachment->id : null,
+    'image_attachment_id' => $imageAttachment ? $imageAttachment->id : null,
+    'image_base64'        => base64_encode($pngBytes),
 ], JSON_PRETTY_PRINT)."\n";

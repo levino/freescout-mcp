@@ -51,7 +51,9 @@ wait_for() {
 
 up() {
   stage
-  "${COMPOSE[@]}" up -d
+  # Recreated, not reused: the modules are installed by a start hook, so a
+  # container that keeps running keeps the code it started with.
+  "${COMPOSE[@]}" up -d --force-recreate
   wait_for "$FREESCOUT_URL/login" "freescout" 600
 
   echo "seeding"

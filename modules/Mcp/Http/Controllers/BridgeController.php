@@ -2,6 +2,7 @@
 
 namespace Modules\Mcp\Http\Controllers;
 
+use App\Attachment;
 use App\Conversation;
 use App\Mailbox;
 use App\Thread;
@@ -13,6 +14,7 @@ use Modules\Mcp\Text;
 class BridgeController extends Controller
 {
     const MAX_LIMIT = 100;
+    const MAX_ATTACHMENT_BYTES = 10485760;
 
     public function mailboxes(Request $request)
     {
@@ -109,7 +111,7 @@ class BridgeController extends Controller
                             : $thread->from,
                         'created_at'  => (string) $thread->created_at,
                         'body'        => $this->toPlainText($thread->body),
-                        'attachments' => (int) $thread->has_attachments,
+                        'attachments' => $this->attachmentsOf($thread),
                     ];
                 })->values(),
             ],
@@ -253,6 +255,70 @@ class BridgeController extends Controller
         }
 
         return $conversation;
+    }
+
+    public function attachment(Request $request, $id)
+    {
+        $user = $this->actingUser($request);
+        if ($user instanceof \Illuminate\Http\JsonResponse) {
+            return $user;
+        }
+
+        $attachment = Attachment::find((int) $id);
+        if (!$attachment || !$attachment->thread) {
+            return response()->json(['error' => 'not found'], 404);
+        }
+
+        $conversation = $attachment->thread->conversation;
+        if (!$conversation || !$this->visibleMailboxes($user)->contains('id', $conversation->mailbox_id)) {
+            return response()->json(['error' => 'no access to this mailbox'], 403);
+        }
+        if (!$attachment->fileExists()) {
+            return response()->json(['error' => 'the file is gone from storage'], 410);
+        }
+        if ((int) $attachment->size > self::MAX_ATTACHMENT_BYTES) {
+            return response()->json([
+                'error' => 'attachment is larger than '.round(self::MAX_ATTACHMENT_BYTES / 1048576).' MB',
+            ], 413);
+        }
+
+        try {
+            $contents = $attachment->getFileContents();
+        } catch (\Exception $e) {
+            \Log::error('[mcp] reading attachment '.$attachment->id.' failed: '.$e->getMessage());
+
+            return response()->json(['error' => 'the file could not be read'], 500);
+        }
+
+        return response()->json([
+            'attachment' => $this->describeAttachment($attachment) + [
+                'conversation_id' => $conversation->id,
+                'base64'          => base64_encode($contents),
+            ],
+        ]);
+    }
+
+    protected function attachmentsOf($thread)
+    {
+        if (!$thread->has_attachments) {
+            return [];
+        }
+
+        return Attachment::where('thread_id', $thread->id)->get()
+            ->map(function ($attachment) {
+                return $this->describeAttachment($attachment);
+            })->values();
+    }
+
+    protected function describeAttachment(Attachment $attachment)
+    {
+        return [
+            'id'        => $attachment->id,
+            'name'      => $attachment->file_name,
+            'mime_type' => $attachment->mime_type,
+            'size'      => (int) $attachment->size,
+            'embedded'  => (bool) $attachment->embedded,
+        ];
     }
 
     protected function summarize(Conversation $conversation)
