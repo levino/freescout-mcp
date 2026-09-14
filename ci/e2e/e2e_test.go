@@ -601,6 +601,58 @@ func TestWebLoginGoesThroughZitadel(t *testing.T) {
 	}
 }
 
+func TestSettingsPageShowsTheEndpoint(t *testing.T) {
+	browser := signedInBrowser(t)
+
+	res, err := browser.Get(freescoutURL + "/settings?section=mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+
+	if res.StatusCode != 200 {
+		t.Fatalf("the settings section answered %d: %s", res.StatusCode, truncate(string(body)))
+	}
+	page := string(body)
+	if !strings.Contains(page, freescoutURL+"/mcp") {
+		t.Fatalf("the page does not show the endpoint address: %s", truncate(page))
+	}
+	if !strings.Contains(page, "Running") {
+		t.Fatalf("the page does not report the server as running: %s", truncate(page))
+	}
+	if !strings.Contains(page, "Token configured") {
+		t.Fatalf("the page does not report the bridge token: %s", truncate(page))
+	}
+
+	sidebar, err := browser.Get(freescoutURL + "/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidebarBody, _ := io.ReadAll(sidebar.Body)
+	sidebar.Body.Close()
+	if !strings.Contains(string(sidebarBody), "section=mcp") {
+		t.Fatalf("the settings menu does not link the section: %s", truncate(string(sidebarBody)))
+	}
+}
+
+func signedInBrowser(t *testing.T) *http.Client {
+	t.Helper()
+	jar, _ := cookiejar.New(nil)
+	browser := &http.Client{Jar: jar, Timeout: 30 * time.Second}
+
+	res, err := browser.Get(freescoutURL + "/zitadel/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != 200 || strings.Contains(string(body), `name="password"`) {
+		t.Fatalf("could not sign in: %d %s", res.StatusCode, truncate(string(body)))
+	}
+	return browser
+}
+
 // FreeScout turns PHP deprecations into exceptions, so a construct that is
 // merely frowned upon in 8.5 takes a whole route down with it.
 func TestNeitherModuleLoggedAnError(t *testing.T) {
