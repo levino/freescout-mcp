@@ -1,0 +1,30 @@
+Everything in this repository is MIT licensed (see LICENSE).
+
+FreeScout itself is AGPL-3.0
+---------------------------
+The two modules run inside FreeScout's process. MIT is compatible with the
+GPL family, so these files stay MIT, while anyone who distributes them
+together with FreeScout distributes that combination under the AGPL. That is
+the usual arrangement for community modules and needs nothing further from us.
+
+No FreeScout code was copied here
+---------------------------------
+The modules call FreeScout rather than reproduce it: replies go through
+Conversation::createUserThread and the UserReplied event, the web login uses
+Auth::login, and the model constants are referenced, not restated. If that
+ever changes and FreeScout code is copied into a file, that file becomes
+AGPL-3.0 and has to say so at the top.
+
+Where the OAuth code comes from
+-------------------------------
+The authorization server in server/ — Client ID Metadata Documents instead of
+dynamic registration, PKCE S256, loopback redirects matched without the port,
+the RFC 8707 resource check — derives from levino/surveys (MIT,
+(c) 2026 Levin Keller), which is the implementation already proven against
+Claude. Its MIT notice above covers those parts as well.
+
+Nothing was taken from FreeScout's paid "API & Webhooks" module. Its code was
+never available to this project; the feature list it inspired (API access to
+conversations, events worth reacting to) came from the public product page at
+https://freescout.net/module/api-webhooks/ — facts about what a program does,
+not its expression.

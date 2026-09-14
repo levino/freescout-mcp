@@ -1,0 +1,50 @@
+# Check-Name im Ruleset: `test` (Workflow `Test`, Job-Id `test`).
+#
+# Läuft bei jedem PR und auf main: Go-Server und die beiden PHP-Module. Die
+# PHP-Tests brauchen kein PHPUnit — sie laufen mit dem PHP, das der Runner
+# ohnehin mitbringt, und genauso im FreeScout-Container.
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+          cache: false
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Nicht formatiert:"; echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      - run: go test -count 1 ./...
+
+      - name: PHP-Syntax aller Moduldateien
+        run: |
+          php -v
+          find modules -name '*.php' -print0 | xargs -0 -n1 -P4 php -l
+
+      - name: PHP-Tests
+        run: php modules/tests/run.php

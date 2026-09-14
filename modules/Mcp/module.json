@@ -1,0 +1,20 @@
+{
+    "name": "Mcp",
+    "alias": "mcp",
+    "description": "Interne Brücke für den MCP-Server, der im selben Pod läuft. Keine öffentliche Schnittstelle.",
+    "version": "0.1.0",
+    "detailsUrl": "https://github.com/levino/freescout-mcp",
+    "author": "Levin Keller",
+    "authorUrl": "https://github.com/levino",
+    "requiredAppVersion": "1.8.240",
+    "license": "MIT",
+    "keywords": ["mcp"],
+    "active": 1,
+    "order": 0,
+    "providers": [
+        "Modules\\Mcp\\Providers\\McpServiceProvider"
+    ],
+    "aliases": {},
+    "files": [],
+    "requires": []
+}

@@ -1,0 +1,42 @@
+# Der große Durchlauf: echtes FreeScout, echte MariaDB, beide Module
+# eingehängt, MCP-Server im selben Container wie in Produktion. Dauert ein paar
+# Minuten, weil FreeScout beim ersten Start das Schema anlegt.
+name: E2E
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+          cache: false
+
+      - name: Stack hochfahren und seeden
+        run: ci/e2e.sh up
+
+      - name: End-to-End-Test
+        run: ci/e2e.sh test
+
+      - name: Logs bei Fehlschlag
+        if: failure()
+        run: ci/e2e.sh logs
+
+      - name: Aufräumen
+        if: always()
+        run: ci/e2e.sh down

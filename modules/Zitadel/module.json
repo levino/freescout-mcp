@@ -1,0 +1,20 @@
+{
+    "name": "Zitadel",
+    "alias": "zitadel",
+    "description": "Anmeldung über ZITADEL (id.levinkeller.de) statt über das FreeScout-Passwort.",
+    "version": "0.1.0",
+    "detailsUrl": "https://github.com/levino/freescout-mcp",
+    "author": "Levin Keller",
+    "authorUrl": "https://github.com/levino",
+    "requiredAppVersion": "1.8.240",
+    "license": "MIT",
+    "keywords": ["oidc", "sso"],
+    "active": 1,
+    "order": 0,
+    "providers": [
+        "Modules\\Zitadel\\Providers\\ZitadelServiceProvider"
+    ],
+    "aliases": {},
+    "files": [],
+    "requires": []
+}

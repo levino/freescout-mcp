@@ -1,0 +1,69 @@
+# Push auf main -> Binary und Module bauen -> Ergebnis auf den Branch
+# `production-dist` veröffentlichen. Kein Image, keine Registry: der Cluster
+# darf nur die GitHub App benutzen, und GHCR lässt eine App-Installation keine
+# privaten Pakete lesen. Git schon.
+#
+# Der Init-Container des FreeScout-Pods klont diesen Branch beim Start. Gepinnt
+# wird der Commit in `levino/server-config`, `apps/freescout/workloads.yaml`
+# (Annotation `levinkeller.de/dist-commit`) — dieser Workflow schreibt den
+# Commit nur in die Job-Zusammenfassung.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+          cache: false
+
+      - name: Server für den Cluster bauen (Hetzner ARM, Alpine)
+        env:
+          GOOS: linux
+          GOARCH: arm64
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist/modules
+          go build -trimpath -ldflags "-s -w" -o dist/mcp-server ./server
+          cp -R modules/Mcp modules/Zitadel dist/modules/
+          file dist/mcp-server || true
+
+      - name: Als Branch `production-dist` veröffentlichen
+        id: dist
+        working-directory: dist
+        run: |
+          echo "${{ github.sha }}" > .dist-commit
+          git init -q -b production-dist
+          git config user.name  "deploy-bot"
+          git config user.email "deploy-bot@users.noreply.github.com"
+          git add -A
+          git commit -q -m "dist for ${{ github.sha }}"
+          git push --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" HEAD:refs/heads/production-dist
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Commit für das Pinning ausgeben
+        run: |
+          {
+            echo "### production-dist"
+            echo
+            echo "Commit: \`${{ steps.dist.outputs.sha }}\`"
+            echo
+            echo "In \`levino/server-config\` in \`apps/freescout/workloads.yaml\` eintragen:"
+            echo '```yaml'
+            echo '        levinkeller.de/dist-commit: "${{ steps.dist.outputs.sha }}"'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

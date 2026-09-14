@@ -1,0 +1,59 @@
+# The end-to-end stack: a real FreeScout against a real MariaDB, with both
+# modules mounted the way the cluster mounts them.
+#
+# The MCP server and the fake login provider are not services here. They are
+# started *inside* the FreeScout container by ci/e2e.sh, because that is what
+# production does too: one pod, one network namespace, the bridge reachable
+# over loopback and nowhere else. Running them as separate compose services
+# would test a setup we do not ship.
+name: freescout-mcp-e2e
+
+services:
+  mariadb:
+    image: mariadb:10.11
+    environment:
+      MARIADB_ROOT_PASSWORD: root-for-tests
+      MARIADB_DATABASE: freescout
+      MARIADB_USER: freescout
+      MARIADB_PASSWORD: freescout-for-tests
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  freescout:
+    image: nfrastack/freescout:2.2.10
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      SETUP_TYPE: AUTO
+      APP_URL: http://127.0.0.1:8080
+      DB_TYPE: mariadb
+      DB_HOST: mariadb
+      DB_NAME: freescout
+      DB_USER: freescout
+      DB_PASS: freescout-for-tests
+      ADMIN_EMAIL: post@levinkeller.de
+      ADMIN_PASS: e2e-admin-password-1234
+      ADMIN_FIRST_NAME: Levin
+      ADMIN_LAST_NAME: Keller
+      TIMEZONE: Europe/Berlin
+      # LARAVEL_ENV_PREFIX is FREESCOUT_ in this image, so these land in the
+      # application's .env without the prefix — exactly like in the cluster.
+      FREESCOUT_MCP_BRIDGE_TOKEN: bridge-token-for-tests
+      FREESCOUT_ZITADEL_ISSUER: http://127.0.0.1:8082
+      FREESCOUT_ZITADEL_CLIENT_ID: freescout-web
+      FREESCOUT_ZITADEL_FORCE_LOGIN: "true"
+    ports:
+      - "127.0.0.1:8080:80"    # FreeScout
+      - "127.0.0.1:8081:8081"  # MCP server, started inside this container
+      - "127.0.0.1:8082:8082"  # fake ZITADEL, started inside this container
+    volumes:
+      # Start hooks the image runs during init: they install the modules into
+      # /data/Modules the way the cluster's init container does, and then
+      # activate them with the script that ships to production.
+      - ./.stage/custom-scripts:/override/custom-scripts:ro
+      # Seed script, staged modules and the two test binaries.
+      - ./:/ci:ro
