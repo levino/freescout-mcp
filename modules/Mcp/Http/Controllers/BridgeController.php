@@ -10,14 +10,6 @@ use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Modules\Mcp\Text;
 
-/**
- * Everything the MCP server can do, expressed in FreeScout's own models.
- *
- * Nothing here talks to the database directly: replies go through
- * Conversation::createUserThread so that mail delivery, threading, folder
- * counters and the UserReplied event happen exactly as they do when a person
- * clicks Reply in the interface.
- */
 class BridgeController extends Controller
 {
     const MAX_LIMIT = 100;
@@ -150,7 +142,6 @@ class BridgeController extends Controller
         }
         $conversation->save();
 
-        // Fires UserReplied, which is what actually sends the email.
         $conversation->createUserThread($user, $body, ['type' => Thread::TYPE_MESSAGE]);
 
         return response()->json(['ok' => true, 'conversation' => $this->summarize($conversation->fresh())]);
@@ -218,8 +209,6 @@ class BridgeController extends Controller
 
         return response()->json(['ok' => true, 'conversation' => $this->summarize($conversation->fresh())]);
     }
-
-    // -- helpers ---------------------------------------------------------
 
     protected function actingUser(Request $request)
     {

@@ -7,9 +7,6 @@ import (
 	"strings"
 )
 
-// Tool results follow the MCP content shape. Everything the model sees comes
-// from the FreeScout module; this file only maps arguments and shapes replies.
-
 func toolDefs() []map[string]any {
 	str := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 	num := func(desc string) map[string]any { return map[string]any{"type": "integer", "description": desc} }

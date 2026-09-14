@@ -10,9 +10,6 @@ import (
 	"strconv"
 )
 
-// Bridge talks to the FreeScout module over the pod's loopback interface.
-// It is the only way this server touches the helpdesk: no SQL, no IMAP, no
-// duplicated business logic.
 type Bridge struct {
 	baseURL string
 	token   string
@@ -69,7 +66,6 @@ func (b *Bridge) do(req *http.Request, actingUser string) (map[string]any, error
 	raw, _ := io.ReadAll(io.LimitReader(res.Body, 8<<20))
 	var decoded map[string]any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
-		// A FreeScout stack trace is HTML; do not hand that to the model.
 		return nil, &bridgeError{Status: res.StatusCode, Message: "unreadable response from FreeScout"}
 	}
 	if res.StatusCode >= 400 {
@@ -82,13 +78,9 @@ func (b *Bridge) do(req *http.Request, actingUser string) (map[string]any, error
 	return decoded, nil
 }
 
-// knownUser reports whether this email belongs to an active FreeScout user.
-// FreeScout's own user list is the access list for this server: whoever may
-// not open the helpdesk may not drive it through Claude either.
+// The bridge wants an acting user on every call, so this one asks on behalf of
+// the very address it is checking; the module answers 403 for an unknown one.
 func (b *Bridge) knownUser(email string) (bool, error) {
-	// The bridge needs an acting user for every call, including this one, so
-	// the lookup asks on behalf of the very address it is checking. An unknown
-	// address is rejected by the module with 403.
 	res, err := b.get("users", nil, email)
 	if err != nil {
 		var be *bridgeError

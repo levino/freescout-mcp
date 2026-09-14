@@ -1,17 +1,12 @@
 <?php
 
 /**
- * Puts a plausible helpdesk into the freshly installed FreeScout of the
- * end-to-end stack: one mailbox, one customer, one conversation that arrived
- * by mail, and a colleague to assign it to.
- *
- * Runs inside the FreeScout container:
+ * Fixture for the end-to-end stack, run inside the FreeScout container:
  *
  *   docker compose exec -T freescout php /ci/seed.php
  *
- * Prints the ids as JSON on stdout so the test can pick them up. The fields it
- * sets mirror what FetchEmails does for an incoming message — a conversation
- * assembled differently would test a shape that never occurs in production.
+ * The fields mirror what FetchEmails sets for an incoming message; a
+ * conversation assembled differently would test a shape production never has.
  */
 
 require '/www/html/vendor/autoload.php';
@@ -28,8 +23,7 @@ use App\User;
 $now = date('Y-m-d H:i:s');
 
 // The image creates this user on an empty database, but its bootstrap has been
-// seen to segfault on arm64 — so the fixture owns the admin rather than hoping
-// for it.
+// seen to segfault on arm64.
 $admin = User::where('email', 'post@levinkeller.de')->first();
 if (!$admin) {
     $admin = new User();
@@ -62,7 +56,6 @@ if (!$mailbox) {
         'from_name' => Mailbox::FROM_NAME_MAILBOX,
     ]);
 }
-// Both users need access, otherwise the bridge hides the mailbox from them.
 $mailbox->users()->sync([$admin->id, $colleague->id]);
 $mailbox->syncPersonalFolders([$admin->id, $colleague->id]);
 

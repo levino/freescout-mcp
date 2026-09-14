@@ -1,8 +1,6 @@
 #!/bin/sh
-# Test scaffolding: puts the staged modules into /data/Modules at container
-# start, which is what the init container does in the cluster. Bind-mounting
-# them instead would test a shape we do not deploy — and would hand FreeScout
-# directories it cannot chown.
+# Test scaffolding: does what the cluster's init container does. Bind-mounting
+# the modules instead would test a shape we do not deploy.
 set -e
 
 SOURCE="/ci/.stage/Modules"

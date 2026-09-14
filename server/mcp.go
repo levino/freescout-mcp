@@ -33,8 +33,8 @@ func rawOrNull(id json.RawMessage) any {
 
 var bearerRe = regexp.MustCompile(`^Bearer\s+(\S+)$`)
 
-// The 401 plus this header is the whole protocol signal that makes Claude show
-// its connect card and start OAuth; scope tells it what to ask for.
+// This header on a 401 is the whole signal that makes Claude offer to connect
+// and start OAuth; scope tells it what to ask for.
 func (a *App) wwwAuthenticate(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate",
 		`Bearer error="invalid_token", error_description="Authentication required", `+
@@ -57,7 +57,6 @@ func (a *App) mountMcp(mux *http.ServeMux) {
 			http.Error(w, "missing or invalid token", 401)
 			return
 		}
-		// No server-initiated stream: everything this server does is a reply.
 		http.Error(w, "Method Not Allowed", 405)
 	})
 

@@ -2,7 +2,6 @@
 
 use Modules\Zitadel\Oidc;
 
-// A token this server would accept: right issuer, right audience, far future.
 $valid = 'e30.eyJpc3MiOiAiaHR0cHM6Ly9pZC5leGFtcGxlIiwgImF1ZCI6ICJmcyIsICJlbWFpbCI6ICJhQGIuZGUiLCAiZXhwIjogNDEwMjQ0NDgwMCwgInN1YiI6ICJ1MSJ9.sig';
 
 function token(array $claims)
@@ -15,8 +14,6 @@ function token(array $claims)
 }
 
 $base = ['iss' => 'https://id.example', 'aud' => 'fs', 'email' => 'a@b.de', 'exp' => 4102444800, 'sub' => 'u1'];
-
-// --- the happy path --------------------------------------------------
 
 $claims = Oidc::claimsFromIdToken($valid, 'https://id.example', 'fs');
 check('email is returned', $claims['email'], 'a@b.de');
@@ -37,8 +34,6 @@ check(
     Oidc::claimsFromIdToken(token(['iss' => 'https://id.example', 'aud' => ['other', 'fs'], 'email' => 'a@b.de', 'exp' => 4102444800]), 'https://id.example', 'fs')['email'],
     'a@b.de'
 );
-
-// --- tokens that must not be believed --------------------------------
 
 check_throws('a token from another issuer is refused', function () use ($valid) {
     Oidc::claimsFromIdToken($valid, 'https://id.levinkeller.de', 'fs');
@@ -80,8 +75,6 @@ check_throws('a JWT with a broken payload is refused', function () {
     Oidc::claimsFromIdToken('e30.###.sig', 'https://id.example', 'fs');
 }, 'payload');
 
-// --- discovery -------------------------------------------------------
-
 $endpoints = Oidc::endpointsFromDiscovery(json_encode([
     'issuer'                 => 'https://id.example',
     'authorization_endpoint' => 'https://id.example/oauth/v2/authorize',
@@ -104,8 +97,6 @@ check_throws('a discovery document without a token endpoint is refused', functio
 check_throws('a discovery response that is not JSON is refused', function () {
     Oidc::endpointsFromDiscovery('<html>gateway timeout</html>');
 }, 'not JSON');
-
-// --- PKCE and encoding ------------------------------------------------
 
 check(
     'the code challenge is the base64url sha256 of the verifier',

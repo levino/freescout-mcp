@@ -14,8 +14,6 @@ import (
 	"time"
 )
 
-// --- test doubles -----------------------------------------------------
-
 type fakeBridge struct {
 	server *httptest.Server
 	calls  []bridgeCall
@@ -92,7 +90,6 @@ func newFakeOIDC(t *testing.T, email string, clientID string) *httptest.Server {
 			"token_endpoint":         issuer + "/token",
 		})
 	})
-	// Stands in for the ZITADEL login screen: it consents immediately.
 	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
 		redirect, err := url.Parse(r.URL.Query().Get("redirect_uri"))
 		if err != nil {
@@ -161,7 +158,6 @@ func challengeFor(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-// authorize walks the full browser flow and returns the authorization code.
 func authorize(t *testing.T, server *httptest.Server, clientID, redirectURI, verifier string) (string, *http.Client) {
 	t.Helper()
 	jar, _ := cookiejar.New(nil)
@@ -169,8 +165,8 @@ func authorize(t *testing.T, server *httptest.Server, clientID, redirectURI, ver
 		Jar:           jar,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error { return nil },
 	}
-	// The client's own redirect target must not be followed: it is where the
-	// code lands.
+	// The client's redirect target must not be followed: it is where the code
+	// lands.
 	browser.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if strings.HasPrefix(req.URL.String(), redirectURI) {
 			return http.ErrUseLastResponse

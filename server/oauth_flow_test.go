@@ -45,8 +45,6 @@ func TestFullFlowIssuesUsableToken(t *testing.T) {
 		t.Fatalf("no tokens: %v", body)
 	}
 
-	// The token works on the MCP endpoint and reaches the bridge as the user
-	// who logged in.
 	_, rpcBody := rpc(t, server, access, map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
 		"params": map[string]any{"name": "list_mailboxes", "arguments": map[string]any{}},
@@ -63,7 +61,6 @@ func TestFullFlowIssuesUsableToken(t *testing.T) {
 		t.Fatalf("bridge token not sent")
 	}
 
-	// Refreshing keeps working.
 	refreshForm := url.Values{}
 	refreshForm.Set("grant_type", "refresh_token")
 	refreshForm.Set("client_id", clientID)
@@ -192,7 +189,6 @@ func TestTamperedTokenIsRejected(t *testing.T) {
 	if res, _ := rpc(t, server, forged, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}); res.StatusCode != 401 {
 		t.Fatalf("forged signature accepted: %d", res.StatusCode)
 	}
-	// A refresh token must not work as an access token.
 	if res, _ := rpc(t, server, tokens.RefreshToken, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}); res.StatusCode != 401 {
 		t.Fatalf("refresh token accepted at the MCP endpoint: %d", res.StatusCode)
 	}

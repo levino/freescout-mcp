@@ -17,8 +17,8 @@ const (
 func (a *App) mountOauth(mux *http.ServeMux) {
 	base := a.cfg.BaseURL
 
-	// RFC 9728 protected resource metadata — at the root and, because the MCP
-	// endpoint has a path, at the path-suffixed location clients try first.
+	// Served at the root and at the path-suffixed location, which is the one
+	// MCP clients try first (RFC 9728).
 	prm := func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{
 			"resource":                 a.cfg.mcpResource(),
@@ -30,9 +30,7 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", prm)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", prm)
 
-	// RFC 8414 authorization server metadata, also under the OpenID Connect
-	// discovery path that MCP clients try second. Two fields make Claude pick
-	// CIMD without asking anyone to register anything:
+	// Two fields make Claude pick CIMD instead of asking for a registration:
 	// client_id_metadata_document_supported and "none" among the auth methods.
 	asm := func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{
@@ -84,8 +82,6 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 			return
 		}
 		authzID := q.Get("state")
-		// The cookie is what ties the login back to the browser that started
-		// it; without this check a stranger could feed us their own state.
 		if authzID == "" || authzID != cookieValue(r, pendingCookie) {
 			http.Error(w, "unknown or mismatched login state", http.StatusBadRequest)
 			return
@@ -110,8 +106,6 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 			return
 		}
 		if !known {
-			// Deliberately specific: the alternative is Levin staring at a
-			// generic error while the reason is a missing FreeScout account.
 			http.Error(w, "There is no active FreeScout user for "+email, http.StatusForbidden)
 			return
 		}
@@ -216,8 +210,8 @@ func (a *App) mountOauth(mux *http.ServeMux) {
 	})
 }
 
-// renderConsent shows who is asking, with the HOST of the client_id URL as the
-// trust anchor: the metadata document is self-asserted, its client_name is not.
+// The trust anchor shown to the user is the host of the client_id URL: the
+// metadata document is self-asserted, so its client_name proves nothing.
 func (a *App) renderConsent(w http.ResponseWriter, pending *PendingAuthz) {
 	clientURL, _ := url.Parse(pending.ClientID)
 	redirectURL, _ := url.Parse(pending.RedirectURI)

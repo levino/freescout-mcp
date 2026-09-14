@@ -1,8 +1,8 @@
 <?php
 
 /**
- * A test harness small enough to run anywhere, including inside the FreeScout
- * container, which ships no dev dependencies and therefore no PHPUnit.
+ * No PHPUnit: this also runs inside the FreeScout container, which ships no
+ * dev dependencies.
  */
 
 $GLOBALS['mcp_tests'] = ['checks' => 0, 'failures' => 0];
@@ -17,7 +17,6 @@ function check($name, $actual, $expected)
     fwrite(STDERR, "FAIL  $name\n  expected: ".var_export($expected, true)."\n  actual:   ".var_export($actual, true)."\n");
 }
 
-/** Asserts that $callable throws, and that the message mentions $needle. */
 function check_throws($name, callable $callable, $needle = '')
 {
     $GLOBALS['mcp_tests']['checks']++;

@@ -1,17 +1,5 @@
 package main
 
-// OAuth 2.1 authorization server for MCP clients.
-//
-// The shape of this — Client ID Metadata Documents instead of dynamic
-// registration, PKCE S256, loopback redirects matched without the port, the
-// RFC 8707 resource check — follows levino/surveys (MIT, © Levin Keller),
-// which is the implementation already proven against Claude. See NOTICE.
-//
-// One deliberate difference: nothing is stored in a database. Pending
-// authorizations and one-time codes live in memory for minutes, and the tokens
-// themselves are HMAC-signed, so a restart neither loses a connection nor
-// needs a volume.
-
 import (
 	"crypto/hmac"
 	"crypto/sha256"
@@ -286,7 +274,6 @@ func (a *App) exchangeRefreshToken(in exchangeRefreshInput) (*IssuedTokens, erro
 		return nil, newHTTPError(400, "invalid_grant", "token/client mismatch")
 	}
 
-	// Still a FreeScout user? A token outliving the account would be a way in.
 	known, err := a.bridge.knownUser(claims.Subject)
 	if err != nil {
 		return nil, err
@@ -389,8 +376,6 @@ func scopeIsSupported(scope string) bool {
 	return true
 }
 
-// checkResource validates an RFC 8707 resource indicator, if the client sent
-// one: tokens minted here are only ever valid for this MCP server.
 func (a *App) checkResource(resource string) error {
 	if resource == "" {
 		return nil
@@ -413,9 +398,8 @@ func isLoopback(u *url.URL) bool {
 	return h == "localhost" || h == "127.0.0.1" || h == "::1"
 }
 
-// redirectURIAllowed: exact match, except for loopback redirects, which native
-// clients bind to an ephemeral port at runtime (RFC 8252 §7.3) — there the
-// port is ignored.
+// Loopback redirects are matched without the port: native clients bind an
+// ephemeral one at runtime (RFC 8252 §7.3). Everything else is exact.
 func redirectURIAllowed(registered []string, presented string) bool {
 	if contains(registered, presented) {
 		return true

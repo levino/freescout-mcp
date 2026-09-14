@@ -1,19 +1,5 @@
 package main
 
-// Client ID Metadata Documents: the client_id IS an https URL, and the JSON
-// document served there describes the client. The server fetches it, checks
-// that the document's own client_id matches the URL, and that is the whole
-// registration — no registration endpoint, no table of clients nobody prunes.
-// A client called "Claude" is Claude because the URL is Anthropic's.
-//
-// Ported from levino/surveys (MIT, © Levin Keller); see NOTICE. Difference:
-// the last good copy is kept in memory rather than in a database, so a hiccup
-// at the metadata host still survives for a while, but a restart forgets it.
-//
-// Fetching URLs on behalf of strangers is an SSRF surface, hence: https only,
-// no redirects followed, host must not resolve to a loopback/private address,
-// short timeout, small body cap.
-
 import (
 	"context"
 	"encoding/json"
@@ -50,7 +36,6 @@ type cimdCache struct {
 
 func newCimdCache() *cimdCache { return &cimdCache{entries: map[string]cimdEntry{}} }
 
-// isClientIDURL: https, a host, a real path, no fragment, no credentials.
 func isClientIDURL(id string, allowHTTP bool) bool {
 	u, err := url.Parse(id)
 	if err != nil {
@@ -151,9 +136,6 @@ func (a *App) fetchClientMetadata(clientID string) (*OAuthClient, time.Duration,
 		if err := validateRedirectURI(r); err != nil {
 			return nil, 0, err
 		}
-		// Self-asserted document: a redirect_uri must either live on the
-		// client_id's own origin or be a loopback address for a native app.
-		// Anything else would let one document hand codes to a third party.
 		ru, _ := url.Parse(r)
 		if !isLoopback(ru) && !(ru.Scheme == u.Scheme && strings.EqualFold(ru.Host, u.Host)) {
 			return nil, 0, fmt.Errorf("redirect_uri %s is neither same-origin with the client_id nor loopback", r)
@@ -207,9 +189,8 @@ func cacheTTL(cc string) time.Duration {
 	return ttl
 }
 
-// resolveClient: memory cache, then a fresh fetch, then — if the fetch fails —
-// the last good copy as long as it is younger than cimdStaleMax. A refresh
-// token must not die because the metadata host had a bad minute.
+// On a failed fetch the last good copy is served for up to cimdStaleMax: a
+// refresh token must not die because the metadata host had a bad minute.
 func (a *App) resolveClient(clientID string) (*OAuthClient, error) {
 	if !isClientIDURL(clientID, a.cimdAllowLocal) {
 		return nil, nil

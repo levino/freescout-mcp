@@ -18,7 +18,6 @@ type App struct {
 	cimd   *cimdCache
 	oidc   *oidcState
 
-	// Tests point the client_id at an http test server; production never does.
 	cimdAllowLocal bool
 }
 
@@ -44,8 +43,6 @@ func (a *App) Handler() http.Handler {
 		writeJSON(w, 200, map[string]string{"status": "ok", "version": version})
 	})
 
-	// Anything else on this host belongs to FreeScout itself, which sits in
-	// front of us in the ingress; a request landing here is a misroute.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	})
@@ -82,7 +79,7 @@ func logRequests(next http.Handler) http.Handler {
 		started := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rec, r)
-		// No query string: it carries codes and tokens.
+		// Never the query string: it carries codes and tokens.
 		logJSON("info", "request", map[string]any{
 			"method": r.Method, "path": r.URL.Path, "status": rec.status,
 			"ms": time.Since(started).Milliseconds(),

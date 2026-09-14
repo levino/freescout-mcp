@@ -1,10 +1,5 @@
-// Command fake-oidc stands in for ZITADEL during the end-to-end test: it
-// serves a discovery document, consents to every authorization immediately,
-// and hands out an id_token for one fixed email address. It also serves the
-// OAuth client metadata document the MCP client identifies itself with.
-//
-// Test scaffolding. It signs nothing and verifies nothing, so it must never
-// run anywhere near a real deployment.
+// Command fake-oidc stands in for ZITADEL in the end-to-end test. It signs
+// nothing and verifies nothing, so it must never run near a real deployment.
 package main
 
 import (
@@ -48,9 +43,8 @@ func main() {
 	})
 
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
-		// Two different clients talk to this endpoint — the MCP server and the
-		// FreeScout SSO module — and both check that the audience is their own
-		// client id. So the audience follows whoever is asking.
+		// Both clients check that the audience is their own client id, so it
+		// follows whoever is asking.
 		_ = r.ParseForm()
 		aud := r.PostForm.Get("client_id")
 		if aud == "" {
@@ -76,8 +70,6 @@ func main() {
 		})
 	})
 
-	// The MCP client's own metadata document, served from this origin so the
-	// redirect URI is same-origin with the client_id.
 	mux.HandleFunc("/client-metadata.json", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"client_id":                  issuer + "/client-metadata.json",
@@ -88,7 +80,6 @@ func main() {
 		})
 	})
 
-	// Where the MCP client's authorization code lands.
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"code": r.URL.Query().Get("code"), "state": r.URL.Query().Get("state")})
 	})

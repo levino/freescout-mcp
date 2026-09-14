@@ -1,11 +1,7 @@
-# The end-to-end stack: a real FreeScout against a real MariaDB, with both
-# modules mounted the way the cluster mounts them.
-#
-# The MCP server and the fake login provider are not services here. They are
-# started *inside* the FreeScout container by ci/e2e.sh, because that is what
-# production does too: one pod, one network namespace, the bridge reachable
-# over loopback and nowhere else. Running them as separate compose services
-# would test a setup we do not ship.
+# The MCP server and the fake login provider are not services here: ci/e2e.sh
+# starts them *inside* the FreeScout container, because that is what production
+# does — one pod, one network namespace, the bridge on loopback and nowhere
+# else. Separate services would test a setup we do not ship.
 name: freescout-mcp-e2e
 
 services:
@@ -41,19 +37,15 @@ services:
       ADMIN_LAST_NAME: Keller
       TIMEZONE: Europe/Berlin
       # LARAVEL_ENV_PREFIX is FREESCOUT_ in this image, so these land in the
-      # application's .env without the prefix — exactly like in the cluster.
+      # application's .env without the prefix.
       FREESCOUT_MCP_BRIDGE_TOKEN: bridge-token-for-tests
       FREESCOUT_ZITADEL_ISSUER: http://127.0.0.1:8082
       FREESCOUT_ZITADEL_CLIENT_ID: freescout-web
       FREESCOUT_ZITADEL_FORCE_LOGIN: "true"
     ports:
-      - "127.0.0.1:8080:80"    # FreeScout
-      - "127.0.0.1:8081:8081"  # MCP server, started inside this container
-      - "127.0.0.1:8082:8082"  # fake ZITADEL, started inside this container
+      - "127.0.0.1:8080:80"
+      - "127.0.0.1:8081:8081"
+      - "127.0.0.1:8082:8082"
     volumes:
-      # Start hooks the image runs during init: they install the modules into
-      # /data/Modules the way the cluster's init container does, and then
-      # activate them with the script that ships to production.
       - ./.stage/custom-scripts:/override/custom-scripts:ro
-      # Seed script, staged modules and the two test binaries.
       - ./:/ci:ro

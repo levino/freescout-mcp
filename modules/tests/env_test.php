@@ -2,9 +2,6 @@
 
 use Modules\Mcp\Env;
 
-// Reading FreeScout's .env ourselves is only safe if the parser agrees with
-// the file Laravel would have read.
-
 check('a plain assignment', Env::parse('FOO=bar')['FOO'], 'bar');
 check('spaces around the equals sign', Env::parse('FOO = bar')['FOO'], 'bar');
 check('an empty value stays empty', Env::parse('FOO=')['FOO'], '');
@@ -34,7 +31,6 @@ check('a realistic file: the token', $parsed['MCP_BRIDGE_TOKEN'], 'a-token-with 
 check('a realistic file: the issuer', $parsed['ZITADEL_ISSUER'], 'https://id.levinkeller.de');
 check('a realistic file: base64 values keep their padding', $parsed['APP_KEY'], 'base64:abc123==');
 
-// get() and bool() read the parsed values without a Laravel application.
 Env::setValues(['SET' => 'yes', 'EMPTY' => '', 'TRUTHY' => 'true', 'FALSY' => 'false']);
 check('get returns a value', Env::get('SET'), 'yes');
 check('get falls back for a missing key', Env::get('MISSING', 'fallback'), 'fallback');

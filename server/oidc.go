@@ -1,8 +1,5 @@
 package main
 
-// Upstream login. This server does not own passwords: it hands the user to
-// ZITADEL and only cares about the email address that comes back.
-
 import (
 	"encoding/base64"
 	"encoding/json"
@@ -126,10 +123,9 @@ func (a *App) oidcExchange(code string) (*oidcClaims, error) {
 	return parseIDToken(payload.IDToken, a.cfg.OIDCIssuer, a.cfg.OIDCClientID)
 }
 
-// parseIDToken reads the claims of a token that this server just fetched over
-// TLS from the issuer's own token endpoint (RFC 8725 §3.2 / OIDC Core 3.1.3.7:
-// no signature check needed on that path), and still verifies issuer,
-// audience and expiry so a misrouted token cannot pass.
+// No signature check: the token came straight from the issuer's token endpoint
+// over TLS (OIDC Core 3.1.3.7). Issuer, audience and expiry are still checked,
+// so a token minted for someone else cannot pass.
 func parseIDToken(token, issuer, audience string) (*oidcClaims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {

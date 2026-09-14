@@ -1,10 +1,6 @@
 <?php
 
-/**
- * Runs every plain-PHP test in this directory.
- *
- *   php modules/tests/run.php
- */
+// php modules/tests/run.php
 
 require __DIR__.'/harness.php';
 require __DIR__.'/../Mcp/Text.php';

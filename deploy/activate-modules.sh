@@ -1,15 +1,8 @@
 #!/bin/sh
-# Activates the two modules on every container start.
-#
 # FreeScout only boots a module that has a row in the `modules` table, and a
 # module dropped into Modules/ has none — in the interface that is the
-# "Activate" click. This does the same thing the interface does, through
-# FreeScout's own model, so a fresh pod comes up with the modules running
-# instead of waiting for someone to click.
-#
-# The image runs every executable *.sh in /override/custom-scripts during init,
-# after the migrations and before it registers modules. Idempotent: an already
-# active module is left alone.
+# "Activate" click. The image runs this from /override/custom-scripts during
+# init, after the migrations and before it registers modules.
 set -e
 
 WEBROOT="${NGINX_WEBROOT:-/www/html}"
@@ -48,9 +41,7 @@ foreach (['Mcp', 'Zitadel'] as $name) {
 PHP
 
 # The first PHP CLI start in a fresh container has been seen to segfault while
-# compiling the application (PHP 8.5 with JIT, aarch64). Opcache buys nothing
-# for a script that runs once, and the work is idempotent, so: JIT off, and
-# retry rather than leave the modules switched off.
+# compiling the application (PHP 8.5 with JIT, aarch64).
 attempt=1
 while [ "$attempt" -le 3 ]; do
     if su -s /bin/sh "$USER" -c "cd $WEBROOT && NGINX_WEBROOT=$WEBROOT php -d opcache.enable_cli=0 -d opcache.jit=off -d opcache.jit_buffer_size=0 /tmp/activate-modules.php"; then
@@ -64,5 +55,4 @@ done
 
 echo "[activate-modules] giving up after 3 attempts" >&2
 rm -f /tmp/activate-modules.php
-# Not fatal: the container should still come up, the modules just stay off.
 exit 0

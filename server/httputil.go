@@ -49,8 +49,6 @@ func (a *App) deleteCookie(w http.ResponseWriter, name string) {
 	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: a.secureCookies()})
 }
 
-// secureCookies is false only for the http://127.0.0.1 base URL the tests use;
-// production is https, where a cookie without this flag would be a mistake.
 func (a *App) secureCookies() bool {
 	return strings.HasPrefix(a.cfg.BaseURL, "https://")
 }

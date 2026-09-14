@@ -1,6 +1,4 @@
-# Der große Durchlauf: echtes FreeScout, echte MariaDB, beide Module
-# eingehängt, MCP-Server im selben Container wie in Produktion. Dauert ein paar
-# Minuten, weil FreeScout beim ersten Start das Schema anlegt.
+# Dauert ein paar Minuten: FreeScout legt beim ersten Start das Schema an.
 name: E2E
 
 on:

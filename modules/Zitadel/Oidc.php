@@ -2,18 +2,8 @@
 
 namespace Modules\Zitadel;
 
-/**
- * The OpenID Connect bits that are worth testing on their own: reading the
- * provider's discovery document and deciding whether an id_token may be
- * believed. No Laravel, no FreeScout, no network in the checking path.
- */
 class Oidc
 {
-    /**
-     * Pick the endpoints out of a discovery document.
-     *
-     * @throws \RuntimeException
-     */
     public static function endpointsFromDiscovery($json)
     {
         $doc = json_decode((string) $json, true);
@@ -37,10 +27,9 @@ class Oidc
     }
 
     /**
-     * Read the claims of an id_token that was just fetched over TLS from the
-     * provider's own token endpoint. On that path the signature adds nothing
-     * (OIDC Core 3.1.3.7), but issuer, audience and expiry still have to match,
-     * otherwise a token meant for someone else would let its bearer in.
+     * No signature check: the token came straight from the issuer's token
+     * endpoint over TLS (OIDC Core 3.1.3.7). Issuer, audience and expiry are
+     * still checked, so a token minted for someone else cannot pass.
      *
      * @throws \RuntimeException
      */
@@ -97,9 +86,6 @@ class Oidc
         return false;
     }
 
-    /**
-     * PKCE S256: the verifier is kept in the session, only its hash travels.
-     */
     public static function codeChallenge($verifier)
     {
         return rtrim(strtr(base64_encode(hash('sha256', $verifier, true)), '+/', '-_'), '=');

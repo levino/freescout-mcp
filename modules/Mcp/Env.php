@@ -3,15 +3,11 @@
 namespace Modules\Mcp;
 
 /**
- * Settings from FreeScout's .env, also when the config cache is in place.
+ * Laravel skips loading the .env file once bootstrap/cache/config.php exists,
+ * and every image we run ships that cache — so env() returns null for anything
+ * not baked into a config file. Hence reading the file.
  *
- * Laravel skips loading the .env file entirely once bootstrap/cache/config.php
- * exists, and that file exists in every image we run — so Laravel's own env()
- * returns null for anything that is not baked into a config file. Reading the
- * file is the reliable way to see a setting that belongs to a module.
- *
- * Duplicated per module on purpose: the two modules are installed
- * independently, and neither may depend on the other being present.
+ * Duplicated per module on purpose: the two are installed independently.
  */
 class Env
 {
@@ -19,8 +15,6 @@ class Env
 
     public static function get($key, $default = null)
     {
-        // function_exists: the helper is also used by the test suite, which
-        // runs without a Laravel application.
         $value = function_exists('env') ? env($key, null) : null;
         if ($value !== null && $value !== '') {
             return $value;
@@ -44,7 +38,6 @@ class Env
         return filter_var($value, FILTER_VALIDATE_BOOLEAN);
     }
 
-    /** Parses the KEY=VALUE lines of a .env file. */
     public static function parse($contents)
     {
         $values = [];
@@ -78,7 +71,6 @@ class Env
         return $values;
     }
 
-    /** Test seam: lets the suite run without a Laravel application. */
     public static function setValues(?array $values = null)
     {
         self::$values = $values;

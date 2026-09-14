@@ -73,8 +73,6 @@ class LoginController extends Controller
 
         $user = User::where('email', $claims['email'])->first();
         if (!$user || !$user->isActive()) {
-            // No auto-provisioning on purpose: who gets into the helpdesk stays
-            // a decision made in the helpdesk.
             return $this->fail('Für '.e($claims['email']).' gibt es hier kein aktives Benutzerkonto.');
         }
 
@@ -83,8 +81,6 @@ class LoginController extends Controller
 
         return redirect()->intended('/');
     }
-
-    // -- helpers ---------------------------------------------------------
 
     protected function configured()
     {
@@ -165,8 +161,6 @@ class LoginController extends Controller
         $response = curl_exec($ch);
         $status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
         $error = curl_error($ch);
-        // No curl_close(): a no-op since PHP 8.0 and deprecated in 8.5, and
-        // FreeScout turns deprecations into exceptions.
 
         if ($response === false) {
             throw new \RuntimeException('request to '.$url.' failed: '.$error);

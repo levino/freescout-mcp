@@ -7,12 +7,9 @@ use Illuminate\Support\Facades\Auth;
 use Modules\Zitadel\Env;
 
 /**
- * Sends the login page to ZITADEL instead of asking for a FreeScout password.
- *
  * A middleware, not a patched view: the container replaces /www/html wholesale
- * on every FreeScout upgrade, so anything edited in the application tree is
- * silently gone the next time the version changes. /login?local=1 still shows
- * the built-in form, which is the way back in if ZITADEL is unreachable.
+ * on every FreeScout upgrade, so an edit in the application tree is silently
+ * gone after the next version bump. /login?local=1 keeps the built-in form.
  */
 class RedirectLoginToZitadel
 {

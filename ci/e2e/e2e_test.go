@@ -1,14 +1,9 @@
 //go:build e2e
 
-// End-to-end test against a real FreeScout: a real MariaDB behind it, both
-// modules installed the way the cluster installs them, and the MCP server
-// running inside the FreeScout container so that the bridge is reached over
-// loopback exactly as it is in the pod.
+// End-to-end test against a real FreeScout. Run it with ci/e2e.sh.
 //
-// Start the stack with ci/e2e.sh, or run the whole thing with `ci/e2e.sh`.
-//
-// Every write is checked in the database afterwards. A tool that answers "ok"
-// while nothing reached the helpdesk is the failure mode this test exists for.
+// Every write is checked in the database afterwards: a tool that answers "ok"
+// while nothing reached the helpdesk is the failure this exists to catch.
 package e2e
 
 import (
@@ -39,10 +34,9 @@ const (
 	redirectURI = "http://localhost/callback"
 	verifier    = "e2e-code-verifier-0123456789-abcdefghij"
 
-	// Mirrors ci/e2e.sh.
 	signingKey = "e2e-signing-key-that-is-long-enough-000"
 
-	// FreeScout's own numbers, from app/Conversation.php and app/Thread.php.
+	// From FreeScout's app/Conversation.php and app/Thread.php.
 	statusActive  = 1
 	statusPending = 2
 	statusClosed  = 3
@@ -84,8 +78,6 @@ func seeded(t *testing.T) seed {
 	return fixture
 }
 
-// --- the database, as the arbiter of what really happened -------------
-
 func query(t *testing.T, sql string) string {
 	t.Helper()
 	cmd := exec.Command("docker", "compose", "-f", "../compose.yml", "exec", "-T", "mariadb",
@@ -110,15 +102,11 @@ func queryInt(t *testing.T, sql string) int {
 	return value
 }
 
-// --- OAuth ------------------------------------------------------------
-
 func challenge(v string) string {
 	sum := sha256.Sum256([]byte(v))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-// connect walks the whole authorization flow once and caches the token: this
-// is the flow Claude performs when someone adds the connector.
 func connect(t *testing.T) string {
 	t.Helper()
 	tokenOnce.Do(func() {
@@ -127,7 +115,6 @@ func connect(t *testing.T) string {
 			Jar:     jar,
 			Timeout: 30 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				// The code lands on the client's redirect target; stop there.
 				if strings.HasPrefix(req.URL.String(), redirectURI) {
 					return http.ErrUseLastResponse
 				}
@@ -213,8 +200,6 @@ func connect(t *testing.T) string {
 	return accessToken
 }
 
-// --- MCP --------------------------------------------------------------
-
 func rpc(t *testing.T, token string, payload map[string]any) (int, map[string]any) {
 	t.Helper()
 	raw, _ := json.Marshal(payload)
@@ -234,8 +219,6 @@ func rpc(t *testing.T, token string, payload map[string]any) (int, map[string]an
 	return res.StatusCode, decoded
 }
 
-// callTool returns the text the model would see, and fails the test when the
-// tool reports an error.
 func callTool(t *testing.T, name string, args map[string]any) string {
 	t.Helper()
 	status, body := rpc(t, connect(t), map[string]any{
@@ -294,8 +277,6 @@ func between(s, start, end string) string {
 	return rest[:j]
 }
 
-// --- the tests --------------------------------------------------------
-
 func TestBothModulesAreInstalledAndActive(t *testing.T) {
 	for _, alias := range []string{"mcp", "zitadel"} {
 		if got := queryInt(t, fmt.Sprintf("select active from modules where alias = '%s'", alias)); got != 1 {
@@ -322,7 +303,6 @@ func TestUnauthenticatedMcpPointsAtTheAuthorizationServer(t *testing.T) {
 		}
 	}
 
-	// And the documents that challenge points at actually exist.
 	for _, path := range []string{
 		"/.well-known/oauth-protected-resource/mcp",
 		"/.well-known/oauth-authorization-server",
@@ -340,7 +320,6 @@ func TestUnauthenticatedMcpPointsAtTheAuthorizationServer(t *testing.T) {
 }
 
 func TestForgedTokenIsRejected(t *testing.T) {
-	// Same shape as a real token, signed with the wrong key.
 	claims, _ := json.Marshal(map[string]any{
 		"k": "access", "s": "post@levinkeller.de", "c": clientID, "sc": "mcp",
 		"e": time.Now().Add(time.Hour).UnixMilli(), "n": "forged",
@@ -354,7 +333,7 @@ func TestForgedTokenIsRejected(t *testing.T) {
 		t.Fatalf("a token signed with the wrong key was accepted: HTTP %d", status)
 	}
 
-	// And the real signing key still works, so the test above proves something.
+	// The real token still works, so the check above proves something.
 	if status, _ := rpc(t, connect(t), map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}); status != 200 {
 		t.Fatalf("the real token was rejected: HTTP %d", status)
 	}
@@ -362,11 +341,8 @@ func TestForgedTokenIsRejected(t *testing.T) {
 }
 
 func TestBridgeIsUnreachableFromOutsideThePod(t *testing.T) {
-	// Same token the sidecar uses, but through the published port: the request
-	// arrives with the docker gateway as its source address, not loopback.
 	for _, headers := range []map[string]string{
 		{},
-		// A forwarded-for header must not be able to fake loopback either.
 		{"X-Forwarded-For": "127.0.0.1"},
 		{"X-Real-IP": "127.0.0.1"},
 	} {
@@ -473,9 +449,8 @@ func TestReplyReallyLandsInTheHelpdesk(t *testing.T) {
 		t.Fatalf("last_reply_from is %d, expected the agent (%d)", got, personUser)
 	}
 
-	// FreeScout queues the outgoing mail rather than sending it inline, so what
-	// we can assert here is that something was handed to the queue for this
-	// conversation — either still waiting or already tried.
+	// FreeScout queues the outgoing mail rather than sending it inline, so the
+	// most this can assert is that something was handed to the queue.
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		queued := queryInt(t, "select count(*) from jobs") +
@@ -536,7 +511,6 @@ func TestStatusAndAssignment(t *testing.T) {
 		t.Fatalf("unassigning left user_id = %d", got)
 	}
 
-	// Back to something sane for anyone poking at the stack afterwards.
 	callTool(t, "set_status", map[string]any{"id": id, "status": "active"})
 	if got := queryInt(t, fmt.Sprintf("select status from conversations where id = %d", id)); got != statusActive {
 		t.Fatalf("status is %d, want %d", got, statusActive)
@@ -566,13 +540,10 @@ func TestMissingConversationIsAToolErrorNotACrash(t *testing.T) {
 	}
 }
 
-// --- the ZITADEL module, driven through the same stack ------------------
-
 func TestWebLoginGoesThroughZitadel(t *testing.T) {
 	jar, _ := cookiejar.New(nil)
 	browser := &http.Client{Jar: jar, Timeout: 30 * time.Second}
 
-	// Without following redirects: /login must hand over to the module.
 	noFollow := &http.Client{
 		Jar:           jar,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -589,8 +560,7 @@ func TestWebLoginGoesThroughZitadel(t *testing.T) {
 		t.Fatalf("/login redirected to %q", location)
 	}
 
-	// The escape hatch has to keep working, it is the way back in when the
-	// login provider is down.
+	// The escape hatch is the way back in when the login provider is down.
 	local, err := noFollow.Get(freescoutURL + "/login?local=1")
 	if err != nil {
 		t.Fatal(err)
@@ -601,7 +571,6 @@ func TestWebLoginGoesThroughZitadel(t *testing.T) {
 		t.Fatalf("/login?local=1 did not show the built-in form: %d", local.StatusCode)
 	}
 
-	// Now the whole way through the login provider and back.
 	landing, err := browser.Get(freescoutURL + "/zitadel/login")
 	if err != nil {
 		t.Fatal(err)
@@ -615,7 +584,6 @@ func TestWebLoginGoesThroughZitadel(t *testing.T) {
 		t.Fatalf("the login was refused: %s", body)
 	}
 
-	// Logged in means the mailbox is visible without the password form.
 	home, err := browser.Get(freescoutURL + "/")
 	if err != nil {
 		t.Fatal(err)
@@ -633,10 +601,8 @@ func TestWebLoginGoesThroughZitadel(t *testing.T) {
 	}
 }
 
-// Anything either module logs as an error is a bug: FreeScout turns PHP
-// deprecations into exceptions, so a construct that is merely frowned upon in
-// PHP 8.5 takes a route down with it. This catches that without anyone having
-// to remember to read the log.
+// FreeScout turns PHP deprecations into exceptions, so a construct that is
+// merely frowned upon in 8.5 takes a whole route down with it.
 func TestNeitherModuleLoggedAnError(t *testing.T) {
 	out, err := exec.Command("docker", "compose", "-f", "../compose.yml", "exec", "-T", "freescout",
 		"sh", "-c", "grep -a 'production.ERROR' /data/storage/logs/laravel.log || true").CombinedOutput()

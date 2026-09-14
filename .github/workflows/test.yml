@@ -1,8 +1,4 @@
 # Check-Name im Ruleset: `test` (Workflow `Test`, Job-Id `test`).
-#
-# Läuft bei jedem PR und auf main: Go-Server und die beiden PHP-Module. Die
-# PHP-Tests brauchen kein PHPUnit — sie laufen mit dem PHP, das der Runner
-# ohnehin mitbringt, und genauso im FreeScout-Container.
 name: Test
 
 on:

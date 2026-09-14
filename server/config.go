@@ -6,33 +6,22 @@ import (
 	"strings"
 )
 
-// Config is env-only; there is no config file.
 type Config struct {
-	// BaseURL is the public origin of this server, e.g.
-	// https://shared-inbox.levinkeller.de. Everything the OAuth discovery
-	// documents advertise is derived from it.
 	BaseURL string
 	Listen  string
 
-	// FreeScout side: the module in this pod.
 	BridgeURL   string
 	BridgeToken string
 
-	// Upstream login (ZITADEL).
 	OIDCIssuer       string
 	OIDCClientID     string
 	OIDCClientSecret string
 	OIDCScopes       string
 
-	// HMAC key for the tokens we mint. Without it nothing starts: tokens would
-	// be forgeable.
 	SigningKey []byte
 
 	AppName string
 
-	// Test-only: allows http client metadata documents on loopback addresses,
-	// which the end-to-end harness serves. Never set this in production — it
-	// is what stops a client_id from pointing into the cluster's own network.
 	InsecureAllowLocalClients bool
 }
 
@@ -79,7 +68,6 @@ func LoadConfig() (*Config, error) {
 
 func (c *Config) callbackURL() string { return c.BaseURL + "/oauth/callback" }
 
-// mcpResource is the canonical resource URI of this MCP server (RFC 8707).
 func (c *Config) mcpResource() string { return c.BaseURL + "/mcp" }
 
 func env(key, fallback string) string {
