@@ -64,6 +64,9 @@ type draftArgs struct {
 	Body                string          `json:"body"`
 	Attachments         []attachmentArg `json:"attachments"`
 	RemoveAttachmentIDs []int64         `json:"remove_attachment_ids"`
+	Status              string          `json:"status"`
+	Send                bool            `json:"send"`
+	IncludeAttachments  *bool           `json:"include_attachments"`
 }
 
 func draftToolDefs() []map[string]any {
@@ -88,12 +91,66 @@ func draftToolDefs() []map[string]any {
 		},
 	}
 	never := " This never sends anything: the draft waits in FreeScout until a person reviews and sends it."
+	signature := " Do not add a signature: FreeScout appends the mailbox's signature when the mail goes out."
+	status := map[string]any{"type": "string", "enum": []string{"active", "pending", "closed"}, "description": "Optional status to set along with sending."}
 
 	return []map[string]any{
 		{
+			"name": "reply_to_conversation",
+			"description": "Send a reply to the customer. This really sends an email — do not call it " +
+				"to draft or to think out loud; use create_draft for a reply a person should check first. " +
+				"The text is sent as written, so write it as the agent whose account is connected." + signature,
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":          num("Conversation id."),
+					"body":        str("The message to the customer, plain text."),
+					"cc":          addresses("Optional Cc addresses."),
+					"bcc":         addresses("Optional Bcc addresses."),
+					"attachments": attachments,
+					"status":      status,
+				},
+				"required": []string{"id", "body"},
+			},
+		},
+		{
+			"name": "send_draft",
+			"description": "Send a draft you created, as it is stored in FreeScout now (a person may have " +
+				"edited it there). This really sends an email: only call it when the person explicitly " +
+				"asked to send this draft after reviewing it. Forward drafts are sent from FreeScout.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"draft_id": num("draft_id from create_draft or create_new_draft."),
+					"status":   status,
+				},
+				"required": []string{"draft_id"},
+			},
+		},
+		{
+			"name": "forward_conversation",
+			"description": "Forward a conversation to someone. By default this only saves a forward draft " +
+				"in the conversation for a person to review and send; with send=true it is sent right away " +
+				"(one recipient, no extra attachments), as FreeScout's Forward does.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":                  num("Conversation id."),
+					"to":                  addresses("Recipient address(es); exactly one when send is true."),
+					"cc":                  addresses("Optional Cc addresses."),
+					"bcc":                 addresses("Optional Bcc addresses."),
+					"body":                str("Optional note above the forwarded messages, plain text."),
+					"include_attachments": map[string]any{"type": "boolean", "description": "Forward the conversation's attachments too. Default true."},
+					"attachments":         attachments,
+					"send":                map[string]any{"type": "boolean", "description": "Send right away instead of saving a draft. Default false."},
+				},
+				"required": []string{"id", "to"},
+			},
+		},
+		{
 			"name": "create_draft",
 			"description": "Write a reply to a conversation as a draft." + never +
-				" It shows up in the conversation and in the mailbox's Drafts folder.",
+				" It shows up in the conversation and in the mailbox's Drafts folder." + signature,
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -109,7 +166,7 @@ func draftToolDefs() []map[string]any {
 		{
 			"name": "create_new_draft",
 			"description": "Write a new email, starting a new conversation, as a draft." + never +
-				" It shows up in the mailbox's Drafts folder.",
+				" It shows up in the mailbox's Drafts folder." + signature,
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -158,7 +215,8 @@ func draftToolDefs() []map[string]any {
 
 func isDraftTool(name string) bool {
 	switch name {
-	case "create_draft", "create_new_draft", "update_draft", "delete_draft":
+	case "create_draft", "create_new_draft", "update_draft", "delete_draft",
+		"reply_to_conversation", "send_draft", "forward_conversation":
 		return true
 	}
 	return false
@@ -233,6 +291,51 @@ func (a *App) dispatchDraftTool(name string, rawArgs json.RawMessage, email stri
 			return toolError("nothing to change")
 		}
 		return a.toolResult(a.bridge.postDraft("drafts/"+strconv.FormatInt(args.DraftID, 10), payload, files, email))
+
+	case "reply_to_conversation":
+		if args.ID <= 0 || strings.TrimSpace(args.Body) == "" {
+			return toolError("id and body are required")
+		}
+		files, err := a.loadAttachments(args.Attachments)
+		if err != nil {
+			return toolError(err.Error())
+		}
+		payload := map[string]any{"body": args.Body, "cc": nonNil(args.Cc), "bcc": nonNil(args.Bcc)}
+		if args.Status != "" {
+			payload["status"] = args.Status
+		}
+		return a.toolResult(a.bridge.postDraft("conversations/"+strconv.FormatInt(args.ID, 10)+"/reply", payload, files, email))
+
+	case "send_draft":
+		if args.DraftID <= 0 {
+			return toolError("draft_id is required")
+		}
+		payload := map[string]any{}
+		if args.Status != "" {
+			payload["status"] = args.Status
+		}
+		return a.toolResult(a.bridge.post("drafts/"+strconv.FormatInt(args.DraftID, 10)+"/send", payload, email))
+
+	case "forward_conversation":
+		if args.ID <= 0 || len(args.To) == 0 {
+			return toolError("id and to are required")
+		}
+		if args.Send && len(args.To) != 1 {
+			return toolError("forward to exactly one address when send is true")
+		}
+		if args.Send && len(args.Attachments) > 0 {
+			return toolError("extra attachments only on a forward draft (send=false)")
+		}
+		files, err := a.loadAttachments(args.Attachments)
+		if err != nil {
+			return toolError(err.Error())
+		}
+		include := args.IncludeAttachments == nil || *args.IncludeAttachments
+		payload := map[string]any{
+			"to": nonNil(args.To), "cc": nonNil(args.Cc), "bcc": nonNil(args.Bcc), "body": args.Body,
+			"send": args.Send, "include_attachments": include,
+		}
+		return a.toolResult(a.bridge.postDraft("conversations/"+strconv.FormatInt(args.ID, 10)+"/forward", payload, files, email))
 
 	case "delete_draft":
 		if args.DraftID <= 0 {

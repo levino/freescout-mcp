@@ -30,9 +30,14 @@ every configuration variable.
   the shared token. The header check is not redundant: the image's nginx
   rewrites `REMOTE_ADDR` from `X-Forwarded-For` for its own network, so the
   address alone can be made to lie.
-- **Writes go through FreeScout.** A reply is `Conversation::createUserThread`,
-  which fires `UserReplied` and with it the mail delivery, threading and folder
-  counters. Never write threads in SQL.
+- **Writes go through FreeScout.** A reply is what `Conversation::createUserThread`
+  does plus cc/bcc/attachments as `send_reply` sets them; files are stored
+  before `UserReplied` fires, which brings the mail delivery, threading and
+  folder counters. `send_draft` mirrors the from-draft path of `send_reply`,
+  forwarding is `Conversation::forward`, moving and merging the model methods
+  the UI calls. Never write threads in SQL.
+- **Only three paths send mail:** `reply_to_conversation`, `send_draft` and
+  `forward_conversation` with `send`. Everything else must stay silent.
 - **Drafts never send.** `create_draft`/`create_new_draft`/`update_draft`
   mirror FreeScout's `save_draft`: `STATE_DRAFT` thread (and conversation for a
   new email), Drafts folder, the `UserCreated…Draft` events — never

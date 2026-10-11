@@ -25,9 +25,10 @@ Claude ──MCP over OAuth──▶ mcp-server ──loopback──▶ FreeScou
 The MCP server runs as a sidecar in the FreeScout pod. It reaches the bridge at
 `http://127.0.0.1`, which never leaves the pod, and the bridge refuses anything
 that does not arrive on loopback with the shared token. Writes are not made in
-SQL: a reply goes through `Conversation::createUserThread`, so mail delivery,
-threading, folder counters and the `UserReplied` event happen exactly as they
-do when a person clicks Reply.
+SQL but through FreeScout's models, the way its own controller does them: a
+reply fires `UserReplied`, so mail delivery, threading and folder counters
+happen exactly as they do when a person clicks Reply; moving and merging are
+`Conversation::moveToMailbox` and `mergeConversations`.
 
 Who may use it is decided in FreeScout, not here. After the ZITADEL login the
 server looks the email address up among the active FreeScout users; if there is
@@ -35,12 +36,25 @@ no account, there is no token. Nobody is created automatically.
 
 ## Tools
 
-`list_mailboxes`, `search_conversations`, `get_conversation`, `get_attachment`,
-`reply_to_conversation`, `add_note`, `set_status`, `assign_conversation`,
-`create_draft`, `create_new_draft`, `update_draft`, `delete_draft`.
+| Tool | What it does |
+| --- | --- |
+| `list_mailboxes` | Mailboxes the user can see |
+| `search_conversations` | FreeScout's own search (subject, number, customer, message text, senders, recipients), filters for status, mailbox, `after`/`before` (start date), `from`, `to`, `state` (`draft`) |
+| `get_conversation`, `get_attachment` | Read a conversation with all messages, notes and drafts; download a file |
+| `find_customers` | Customers by name, company or address, with their latest conversations |
+| `reply_to_conversation` | **Sends** a reply, optionally with cc, bcc and attachments |
+| `create_draft`, `create_new_draft`, `update_draft`, `delete_draft` | Drafts — never send |
+| `send_draft` | **Sends** a draft the user created, only on explicit request after review |
+| `forward_conversation` | Saves a forward draft (default) or, with `send`, **sends** the forward |
+| `add_note`, `set_status`, `assign_conversation` | Internal note, status, assignee |
+| `move_conversation`, `merge_conversations` | Move to another mailbox, merge into one conversation |
 
-`reply_to_conversation` really sends an email. `add_note` never does, and
-neither do any of the draft tools.
+Only `reply_to_conversation`, `send_draft` and `forward_conversation` with
+`send: true` send email. The mailbox signature is never part of the text: FreeScout
+adds it to every outgoing message from an agent, as it does for the web editor.
+
+Not available, because FreeScout has no such feature without paid modules:
+tags and snoozing.
 
 ### Drafts
 

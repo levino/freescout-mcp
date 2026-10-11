@@ -88,7 +88,8 @@ func newFakeBridge(t *testing.T, users ...string) *fakeBridge {
 			writeJSON(w, 200, map[string]any{"total": 1, "conversations": []map[string]any{{"id": 7, "subject": "Dach"}}})
 		case "conversations/7/reply":
 			writeJSON(w, 200, map[string]any{"ok": true})
-		case "conversations/7/draft", "drafts", "drafts/5", "drafts/5/delete":
+		case "conversations/7/draft", "drafts", "drafts/5", "drafts/5/delete", "drafts/5/send",
+			"conversations/7/forward", "conversations/7/move", "conversations/7/merge", "customers":
 			writeJSON(w, 200, map[string]any{"ok": true, "draft": map[string]any{"draft_id": 5, "sent": false}})
 		case "conversations/9/reply":
 			writeJSON(w, 404, map[string]string{"error": "not found"})

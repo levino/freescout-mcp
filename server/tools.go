@@ -22,14 +22,20 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name": "search_conversations",
-			"description": "List conversations, newest reply first. Use it to find a thread before " +
-				"reading or answering it. Without arguments it returns the most recent conversations.",
+			"description": "Search conversations, newest reply first, with the same search FreeScout's own " +
+				"search page uses. Use it to find a thread before reading or answering it. Without " +
+				"arguments it returns the most recent conversations.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"query":      str("Free text matched against subject, customer address and preview."),
+					"query":      str("Free text matched against subject, conversation number, customer name and address, and the text, sender and recipients of every message."),
 					"status":     map[string]any{"type": "string", "enum": []string{"active", "pending", "closed", "spam"}, "description": "Restrict to one status."},
 					"mailbox_id": num("Restrict to one mailbox (see list_mailboxes)."),
+					"after":      str("Only conversations started on or after this day, YYYY-MM-DD."),
+					"before":     str("Only conversations started on or before this day, YYYY-MM-DD."),
+					"from":       str("Only conversations with a message from this address (or part of it)."),
+					"to":         str("Only conversations with a message to or cc this address (or part of it)."),
+					"state":      map[string]any{"type": "string", "enum": []string{"published", "draft"}, "description": "draft lists unsent new-email drafts instead of real conversations. Default published."},
 					"limit":      num("How many to return, 1-100, default 25."),
 					"offset":     num("Skip this many results, for paging."),
 				},
@@ -42,21 +48,6 @@ func toolDefs() []map[string]any {
 				"type":       "object",
 				"properties": map[string]any{"id": num("Conversation id from search_conversations.")},
 				"required":   []string{"id"},
-			},
-		},
-		{
-			"name": "reply_to_conversation",
-			"description": "Send a reply to the customer. This really sends an email — do not call it " +
-				"to draft or to think out loud; use create_draft for a reply a person should check first. " +
-				"The text is sent as written, so write it as the agent whose account is connected.",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"id":     num("Conversation id."),
-					"body":   str("The message to the customer, plain text."),
-					"status": map[string]any{"type": "string", "enum": []string{"active", "pending", "closed"}, "description": "Optional status to set along with the reply."},
-				},
-				"required": []string{"id", "body"},
 			},
 		},
 		{
@@ -106,18 +97,61 @@ func toolDefs() []map[string]any {
 			},
 		},
 	}
+	defs = append(defs,
+		map[string]any{
+			"name": "find_customers",
+			"description": "Look up customers by name, company or email address, with their latest " +
+				"conversations in the mailboxes you can see.",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"query": str("Name, company or (part of an) email address, at least two characters.")},
+				"required":   []string{"query"},
+			},
+		},
+		map[string]any{
+			"name":        "move_conversation",
+			"description": "Move a conversation to another mailbox, as FreeScout's Move menu does.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":         num("Conversation id."),
+					"mailbox_id": num("Target mailbox (see list_mailboxes)."),
+				},
+				"required": []string{"id", "mailbox_id"},
+			},
+		},
+		map[string]any{
+			"name": "merge_conversations",
+			"description": "Merge other conversations into this one, as FreeScout's Merge dialog does. Their " +
+				"messages move here and the emptied conversations go to Deleted. Cannot be undone from here.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id":        num("The conversation that stays."),
+					"merge_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "Conversations to merge into it."},
+				},
+				"required": []string{"id", "merge_ids"},
+			},
+		},
+	)
 	return append(defs, draftToolDefs()...)
 }
 
 type toolArgs struct {
-	ID            int64  `json:"id"`
-	Query         string `json:"query"`
-	Status        string `json:"status"`
-	MailboxID     int64  `json:"mailbox_id"`
-	Limit         int64  `json:"limit"`
-	Offset        int64  `json:"offset"`
-	Body          string `json:"body"`
-	AssigneeEmail string `json:"assignee_email"`
+	ID            int64   `json:"id"`
+	Query         string  `json:"query"`
+	After         string  `json:"after"`
+	Before        string  `json:"before"`
+	From          string  `json:"from"`
+	To            string  `json:"to"`
+	State         string  `json:"state"`
+	MergeIDs      []int64 `json:"merge_ids"`
+	Status        string  `json:"status"`
+	MailboxID     int64   `json:"mailbox_id"`
+	Limit         int64   `json:"limit"`
+	Offset        int64   `json:"offset"`
+	Body          string  `json:"body"`
+	AssigneeEmail string  `json:"assignee_email"`
 }
 
 func (a *App) dispatchTool(name string, rawArgs json.RawMessage, email string) map[string]any {
@@ -153,6 +187,11 @@ func (a *App) dispatchTool(name string, rawArgs json.RawMessage, email string) m
 		if args.Offset > 0 {
 			q.Set("offset", strconv.FormatInt(args.Offset, 10))
 		}
+		for key, value := range map[string]string{"after": args.After, "before": args.Before, "from": args.From, "to": args.To, "state": args.State} {
+			if value = strings.TrimSpace(value); value != "" {
+				q.Set(key, value)
+			}
+		}
 		return a.toolResult(a.bridge.get("conversations", q, email))
 
 	case "get_conversation":
@@ -160,16 +199,6 @@ func (a *App) dispatchTool(name string, rawArgs json.RawMessage, email string) m
 			return toolError("id is required")
 		}
 		return a.toolResult(a.bridge.get("conversations/"+strconv.FormatInt(args.ID, 10), nil, email))
-
-	case "reply_to_conversation":
-		if args.ID <= 0 || strings.TrimSpace(args.Body) == "" {
-			return toolError("id and body are required")
-		}
-		payload := map[string]any{"body": args.Body}
-		if args.Status != "" {
-			payload["status"] = args.Status
-		}
-		return a.toolResult(a.bridge.post("conversations/"+strconv.FormatInt(args.ID, 10)+"/reply", payload, email))
 
 	case "get_attachment":
 		if args.ID <= 0 {
@@ -201,6 +230,26 @@ func (a *App) dispatchTool(name string, rawArgs json.RawMessage, email string) m
 		}
 		return a.toolResult(a.bridge.post("conversations/"+strconv.FormatInt(args.ID, 10)+"/assign",
 			map[string]any{"assignee_email": args.AssigneeEmail}, email))
+
+	case "find_customers":
+		if len(strings.TrimSpace(args.Query)) < 2 {
+			return toolError("query needs at least two characters")
+		}
+		return a.toolResult(a.bridge.get("customers", url.Values{"query": {strings.TrimSpace(args.Query)}}, email))
+
+	case "move_conversation":
+		if args.ID <= 0 || args.MailboxID <= 0 {
+			return toolError("id and mailbox_id are required")
+		}
+		return a.toolResult(a.bridge.post("conversations/"+strconv.FormatInt(args.ID, 10)+"/move",
+			map[string]any{"mailbox_id": args.MailboxID}, email))
+
+	case "merge_conversations":
+		if args.ID <= 0 || len(args.MergeIDs) == 0 {
+			return toolError("id and merge_ids are required")
+		}
+		return a.toolResult(a.bridge.post("conversations/"+strconv.FormatInt(args.ID, 10)+"/merge",
+			map[string]any{"merge_ids": args.MergeIDs}, email))
 
 	default:
 		return toolError("unknown tool: " + name)
