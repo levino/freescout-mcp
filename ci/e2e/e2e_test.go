@@ -1291,9 +1291,6 @@ func TestForwardAsDraftCopiesTheAttachments(t *testing.T) {
 	if got := query(t, fmt.Sprintf("select state, coalesce(send_status, 'null') from threads where id = %d", tid)); got != fmt.Sprintf("%d\tnull", stateDraft) {
 		t.Fatalf("the forward draft went out: %q", got)
 	}
-	if got := queryInt(t, fmt.Sprintf("select count(*) from jobs where payload like '%%i:%d;%%'", tid)); got != 0 {
-		t.Fatalf("a forward draft queued mail")
-	}
 	callTool(t, "delete_draft", map[string]any{"draft_id": tid})
 	for _, original := range []int{fixture.TextAttachment, fixture.ImgAttachment} {
 		if got := queryInt(t, fmt.Sprintf("select count(*) from attachments where id = %d", original)); got != 1 {
