@@ -128,6 +128,22 @@ $imageAttachment = Attachment::create(
 $thread->has_attachments = true;
 $thread->save();
 
+// A colleague's unsent reply, the way FreeScout's save_draft leaves it: the
+// MCP tools may show it but must not change or discard it.
+$colleagueDraft = new Thread();
+$colleagueDraft->conversation_id = $conversation->id;
+$colleagueDraft->user_id = $colleague->id;
+$colleagueDraft->type = Thread::TYPE_MESSAGE;
+$colleagueDraft->state = Thread::STATE_DRAFT;
+$colleagueDraft->source_via = Thread::PERSON_USER;
+$colleagueDraft->source_type = Thread::SOURCE_TYPE_WEB;
+$colleagueDraft->customer_id = $customer->id;
+$colleagueDraft->created_by_user_id = $colleague->id;
+$colleagueDraft->body = 'Entwurf der Kollegin';
+$colleagueDraft->setTo('kundin@example.com');
+$colleagueDraft->save();
+$conversation->addToFolder(App\Folder::TYPE_DRAFTS);
+
 $mailbox->updateFoldersCounters();
 
 echo json_encode([
@@ -140,4 +156,5 @@ echo json_encode([
     'text_attachment_id'  => $textAttachment ? $textAttachment->id : null,
     'image_attachment_id' => $imageAttachment ? $imageAttachment->id : null,
     'image_base64'        => base64_encode($pngBytes),
+    'colleague_draft_id'  => $colleagueDraft->id,
 ], JSON_PRETTY_PRINT)."\n";

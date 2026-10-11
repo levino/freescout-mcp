@@ -27,6 +27,12 @@ type bridgeCall struct {
 	ActingUser string
 	Token      string
 	Body       map[string]any
+	Files      []fakeFile
+}
+
+type fakeFile struct {
+	Name string
+	Data []byte
 }
 
 func newFakeBridge(t *testing.T, users ...string) *fakeBridge {
@@ -40,7 +46,20 @@ func newFakeBridge(t *testing.T, users ...string) *fakeBridge {
 			ActingUser: r.Header.Get("X-Mcp-Acting-User"),
 			Token:      r.Header.Get("X-Mcp-Bridge-Token"),
 		}
-		if r.Method == "POST" {
+		if r.Method == "POST" && strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			// Draft routes: fields as JSON in `payload`, files in `files[]`.
+			if err := r.ParseMultipartForm(64 << 20); err != nil {
+				writeJSON(w, 400, map[string]string{"error": "bad multipart: " + err.Error()})
+				return
+			}
+			_ = json.Unmarshal([]byte(r.FormValue("payload")), &call.Body)
+			for _, header := range r.MultipartForm.File["files[]"] {
+				file, _ := header.Open()
+				data, _ := io.ReadAll(file)
+				file.Close()
+				call.Files = append(call.Files, fakeFile{Name: header.Filename, Data: data})
+			}
+		} else if r.Method == "POST" {
 			raw, _ := io.ReadAll(r.Body)
 			_ = json.Unmarshal(raw, &call.Body)
 		}
@@ -69,6 +88,8 @@ func newFakeBridge(t *testing.T, users ...string) *fakeBridge {
 			writeJSON(w, 200, map[string]any{"total": 1, "conversations": []map[string]any{{"id": 7, "subject": "Dach"}}})
 		case "conversations/7/reply":
 			writeJSON(w, 200, map[string]any{"ok": true})
+		case "conversations/7/draft", "drafts", "drafts/5", "drafts/5/delete":
+			writeJSON(w, 200, map[string]any{"ok": true, "draft": map[string]any{"draft_id": 5, "sent": false}})
 		case "conversations/9/reply":
 			writeJSON(w, 404, map[string]string{"error": "not found"})
 		default:

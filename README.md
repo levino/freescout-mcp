@@ -35,10 +35,35 @@ no account, there is no token. Nobody is created automatically.
 
 ## Tools
 
-`list_mailboxes`, `search_conversations`, `get_conversation`,
-`reply_to_conversation`, `add_note`, `set_status`, `assign_conversation`.
+`list_mailboxes`, `search_conversations`, `get_conversation`, `get_attachment`,
+`reply_to_conversation`, `add_note`, `set_status`, `assign_conversation`,
+`create_draft`, `create_new_draft`, `update_draft`, `delete_draft`.
 
-`reply_to_conversation` really sends an email. `add_note` never does.
+`reply_to_conversation` really sends an email. `add_note` never does, and
+neither do any of the draft tools.
+
+### Drafts
+
+`create_draft` (a reply in an existing conversation) and `create_new_draft`
+(a new email, starting a new conversation) **never send anything**. They write
+a draft exactly the way FreeScout's own editor does when it saves one
+(`save_draft` in `ConversationsController`): a thread with
+`Thread::STATE_DRAFT`, for a new email also a conversation with
+`Conversation::STATE_DRAFT` and recipients on the thread, and the conversation
+in the mailbox's Drafts folder. No `UserReplied` event, nothing in the mail
+queue. A person opens the draft in FreeScout, checks it and clicks Send.
+
+Attachments (`[{filename, content_base64 | url, mime_type?}]`, at most 20 files
+and 20 MB together) go through `Attachment::create` like an upload from the
+editor: the file lands in FreeScout's private storage
+(`storage/app/attachment/…`), the row in `attachments`, bound to the draft
+thread, so it shows in the editor and goes out with the mail. A `url` is
+downloaded by the MCP server, https only, and never from loopback, private or
+link-local addresses.
+
+`update_draft` and `delete_draft` only touch drafts the connected user created.
+`get_conversation` marks unsent drafts with `"draft": true`; their thread id is
+the `draft_id`.
 
 ## Configuration
 
@@ -56,7 +81,7 @@ no account, there is no token. Nobody is created automatically.
 | `OIDC_SCOPES` | no | Default `openid profile email`. |
 | `TOKEN_SIGNING_KEY` | yes | At least 32 bytes. Tokens are HMAC-signed, so a restart keeps connections alive and no database is needed. |
 | `APP_NAME` | no | Shown on the consent page. |
-| `INSECURE_ALLOW_LOCAL_CLIENTS` | no | Tests only. Allows client metadata documents on loopback addresses. |
+| `INSECURE_ALLOW_LOCAL_CLIENTS` | no | Tests only. Allows client metadata documents and attachment URLs on loopback and private addresses, and over plain http. |
 
 ### FreeScout modules
 
@@ -105,7 +130,8 @@ the way the cluster mounts them, runs the MCP server *inside* the FreeScout
 container so the bridge is reached over loopback as in production, and then
 drives the whole path: OAuth with PKCE, every tool, the ZITADEL login — and
 checks in the database that the replies, notes, status changes and assignments
-really landed. `ci/e2e.sh up` leaves the stack running, `ci/e2e.sh down`
+really landed, that drafts are stored as FreeScout drafts and never queue a
+mail. `ci/e2e.sh up` leaves the stack running, `ci/e2e.sh down`
 removes it.
 
 All three run in CI on every pull request.

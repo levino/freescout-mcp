@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 type Bridge struct {
@@ -48,6 +51,55 @@ func (b *Bridge) post(path string, body map[string]any, actingUser string) (map[
 	}
 	req.Header.Set("Content-Type", "application/json")
 	return b.do(req, actingUser)
+}
+
+// postDraft sends the draft fields as JSON in the form field `payload` and the
+// files as real uploads in `files[]`, so PHP streams them to disk and
+// FreeScout stores them the way its own upload does. payload["attachments"]
+// describes the files in the same order.
+func (b *Bridge) postDraft(path string, payload map[string]any, files []draftFile, actingUser string) (map[string]any, error) {
+	meta := make([]map[string]string, 0, len(files))
+	for _, f := range files {
+		meta = append(meta, map[string]string{"filename": f.Name, "mime_type": f.MimeType})
+	}
+	payload["attachments"] = meta
+	fields, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	if err := form.WriteField("payload", string(fields)); err != nil {
+		return nil, err
+	}
+	for _, f := range files {
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="files[]"; filename="%s"`, quoteFileName(f.Name)))
+		header.Set("Content-Type", "application/octet-stream")
+		part, err := form.CreatePart(header)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := part.Write(f.Data); err != nil {
+			return nil, err
+		}
+	}
+	if err := form.Close(); err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", b.baseURL+"/mcp-bridge/"+path, &body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	return b.do(req, actingUser)
+}
+
+// The name that counts travels in the payload; this one only has to parse.
+func quoteFileName(name string) string {
+	return strings.NewReplacer("\\", "_", `"`, "_", "\r", "_", "\n", "_").Replace(name)
 }
 
 func (b *Bridge) do(req *http.Request, actingUser string) (map[string]any, error) {
