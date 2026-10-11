@@ -4,8 +4,11 @@ namespace Modules\Mcp\Http\Controllers;
 
 use App\Attachment;
 use App\Conversation;
+use App\Customer;
 use App\Events\UserCreatedConversationDraft;
+use App\Events\UserCreatedConversation;
 use App\Events\UserCreatedThreadDraft;
+use App\Events\UserReplied;
 use App\Folder;
 use App\Mailbox;
 use App\Thread;
@@ -54,6 +57,11 @@ class BridgeController extends Controller
         })->values()]);
     }
 
+    /**
+     * Search through FreeScout's own Conversation::search, the query behind
+     * its search page: subject, customer, number, and every message's text,
+     * sender and recipients.
+     */
     public function conversations(Request $request)
     {
         $user = $this->actingUser($request);
@@ -64,26 +72,48 @@ class BridgeController extends Controller
         $limit = min((int) $request->input('limit', 25) ?: 25, self::MAX_LIMIT);
         $offset = max((int) $request->input('offset', 0), 0);
 
-        $query = Conversation::whereIn('mailbox_id', $this->visibleMailboxes($user)->pluck('id')->all())
-            ->where('state', Conversation::STATE_PUBLISHED);
-
-        if ($status = $this->statusValue($request->input('status'))) {
-            $query->where('status', $status);
-        }
+        $filters = [];
         if ($mailboxId = (int) $request->input('mailbox_id')) {
-            $query->where('mailbox_id', $mailboxId);
+            if (!$this->visibleMailboxes($user)->contains('id', $mailboxId)) {
+                return response()->json(['error' => 'no access to this mailbox'], 403);
+            }
+            $filters['mailbox'] = $mailboxId;
         }
-        if ($needle = trim((string) $request->input('query', ''))) {
-            $like = '%'.$needle.'%';
+        if ($status = $this->statusValue($request->input('status'))) {
+            $filters['status'] = [$status];
+        }
+        $filters['state'] = [$request->input('state') === 'draft' ? Conversation::STATE_DRAFT : Conversation::STATE_PUBLISHED];
+        foreach (['after', 'before'] as $bound) {
+            $value = trim((string) $request->input($bound, ''));
+            if ($value === '') {
+                continue;
+            }
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) || strtotime($value) === false) {
+                return response()->json(['error' => $bound.' must be a date like 2026-10-31'], 422);
+            }
+            $filters[$bound] = $value;
+        }
+        if ($user->canSeeOnlyAssignedConversations()) {
+            $filters['assigned'] = $user->id;
+        }
+
+        $query = Conversation::search(trim((string) $request->input('query', '')), $filters, $user);
+
+        if ($from = trim((string) $request->input('from', ''))) {
+            $query->where('threads.from', 'like', '%'.mb_strtolower($from).'%');
+        }
+        if ($to = trim((string) $request->input('to', ''))) {
+            $like = '%'.mb_strtolower($to).'%';
             $query->where(function ($q) use ($like) {
-                $q->where('subject', 'like', $like)
-                  ->orWhere('customer_email', 'like', $like)
-                  ->orWhere('preview', 'like', $like);
+                $q->where('threads.to', 'like', $like)->orWhere('threads.cc', 'like', $like);
             });
         }
 
-        $total = $query->count();
-        $conversations = $query->orderBy('last_reply_at', 'desc')->skip($offset)->take($limit)->get();
+        // The query is grouped by conversation, so count the groups.
+        $total = \DB::table(\DB::raw('('.$query->toSql().') as matches'))
+            ->mergeBindings($query->getQuery())
+            ->count();
+        $conversations = $query->skip($offset)->take($limit)->get();
 
         return response()->json([
             'total'         => $total,
@@ -130,6 +160,11 @@ class BridgeController extends Controller
         ]);
     }
 
+    /**
+     * Sends a reply. What Conversation::createUserThread does, plus cc, bcc
+     * and attachments the way the reply form's send_reply sets them; the
+     * files are stored before UserReplied fires, so they go out with the mail.
+     */
     public function reply(Request $request, $id)
     {
         $conversation = $this->findConversation($request, $id);
@@ -138,27 +173,409 @@ class BridgeController extends Controller
         }
         $user = $this->actingUser($request);
 
-        $body = $this->bodyHtml($request->input('body'));
-        if ($body === '') {
+        if ($conversation->state != Conversation::STATE_PUBLISHED) {
+            return response()->json(['error' => 'this conversation is an unsent draft, send it with send_draft'], 422);
+        }
+        $input = $this->draftInput($request, ['body', 'cc', 'bcc', 'attachments']);
+        if ($input instanceof \Illuminate\Http\JsonResponse) {
+            return $input;
+        }
+        if ($input['body'] === '') {
             return response()->json(['error' => 'empty body'], 422);
         }
+        $status = $this->statusValue($this->draftPayload($request)['status'] ?? null);
 
-        $now = date('Y-m-d H:i:s');
-        $conversation->setPreview($body);
-        $conversation->last_reply_at = $now;
-        $conversation->last_reply_from = Conversation::PERSON_USER;
-        $conversation->user_updated_at = $now;
+        $thread = $this->transaction(function () use ($conversation, $user, $input, $status) {
+            $now = date('Y-m-d H:i:s');
+            $conversation->setPreview($input['body']);
+            $conversation->last_reply_at = $now;
+            $conversation->last_reply_from = Conversation::PERSON_USER;
+            $conversation->user_updated_at = $now;
+            if (count($input['cc'])) {
+                $conversation->setCc(array_values(array_diff($input['cc'], [$conversation->customer_email])));
+            }
+            if (count($input['bcc'])) {
+                $conversation->setBcc($input['bcc']);
+            }
+            if (count($input['attachments'])) {
+                $conversation->has_attachments = true;
+            }
+            if ($status) {
+                $conversation->setStatus($status, $user);
+            } else {
+                $conversation->updateFolder();
+            }
+            $conversation->save();
 
-        if ($status = $this->statusValue($request->input('status'))) {
-            $conversation->setStatus($status, $user);
-        } else {
-            $conversation->updateFolder();
+            $thread = Thread::create($conversation, Thread::TYPE_MESSAGE, $input['body'], [], false);
+            $thread->source_via = Thread::PERSON_USER;
+            $thread->source_type = Thread::SOURCE_TYPE_WEB;
+            $thread->user_id = $conversation->user_id;
+            $thread->status = $conversation->status;
+            $thread->state = Thread::STATE_PUBLISHED;
+            $thread->customer_id = $conversation->customer_id;
+            $thread->created_by_user_id = $user->id;
+            $thread->edited_by_user_id = null;
+            $thread->edited_at = null;
+            $thread->setTo($conversation->customer_email);
+            $thread->setCc($input['cc']);
+            $thread->setBcc($input['bcc']);
+            $thread->has_attachments = count($input['attachments']) > 0;
+            $thread->save();
+
+            $this->storeAttachments($input['attachments'], $thread, $user);
+
+            return $thread;
+        });
+        if ($thread instanceof \Illuminate\Http\JsonResponse) {
+            return $thread;
         }
-        $conversation->save();
 
-        $conversation->createUserThread($user, $body, ['type' => Thread::TYPE_MESSAGE]);
+        $conversation->mailbox->updateFoldersCounters();
+        event(new UserReplied($conversation, $thread));
+        \Eventy::action('conversation.user_replied', $conversation, $thread);
+
+        return response()->json([
+            'ok'           => true,
+            'thread_id'    => $thread->id,
+            'attachments'  => $this->attachmentsOf($thread->fresh()),
+            'conversation' => $this->summarize($conversation->fresh()),
+        ]);
+    }
+
+    /**
+     * Sends a draft the acting user wrote — the from_draft path of FreeScout's
+     * send_reply: the draft thread itself becomes the published message, a
+     * new-conversation draft gets its customer and becomes a conversation.
+     */
+    public function sendDraft(Request $request, $id)
+    {
+        $thread = $this->findOwnDraft($request, $id);
+        if ($thread instanceof \Illuminate\Http\JsonResponse) {
+            return $thread;
+        }
+        $user = $this->actingUser($request);
+        $conversation = $thread->conversation;
+        $isNewConversation = $conversation->state == Conversation::STATE_DRAFT;
+
+        if ($thread->subtype == Thread::SUBTYPE_FORWARD) {
+            return response()->json(['error' => 'a forward draft is sent from FreeScout, or use forward_conversation with send'], 422);
+        }
+        if (trim(Text::toPlainText($thread->body)) === '') {
+            return response()->json(['error' => 'the draft has no text'], 422);
+        }
+        $to = $thread->getToArray();
+        if ($isNewConversation && !count($to)) {
+            return response()->json(['error' => 'the draft has no recipient'], 422);
+        }
+        if ($isNewConversation && trim((string) $conversation->subject) === '') {
+            return response()->json(['error' => 'the draft has no subject'], 422);
+        }
+        $status = $this->statusValue($request->input('status'));
+
+        $prevState = $conversation->state;
+        $sent = $this->transaction(function () use ($thread, $conversation, $user, $isNewConversation, $to, $status) {
+            $now = date('Y-m-d H:i:s');
+            $cc = $thread->getCcArray();
+
+            if ($isNewConversation) {
+                // First recipient is the customer, the others go to Cc.
+                $customerEmail = $to[0];
+                $customer = Customer::create($customerEmail);
+                $conversation->customer_id = $customer->id;
+                $conversation->customer_email = $customerEmail;
+                $cc = array_values(array_diff($cc, [$customerEmail]));
+                if (count($to) > 1) {
+                    $cc = array_values(array_unique(array_merge($cc, array_diff($to, [$customerEmail]))));
+                }
+                $conversation->setCc($cc);
+                $conversation->state = Conversation::STATE_PUBLISHED;
+                if ($status) {
+                    $conversation->status = $status;
+                }
+                if ($conversation->isClosed()) {
+                    $conversation->closed_by_user_id = $user->id;
+                    $conversation->closed_at = $now;
+                }
+                $thread->first = true;
+            } else {
+                $conversation->setCc(array_values(array_diff($cc, [$conversation->customer_email])));
+                if ($status) {
+                    $conversation->setStatus($status, $user);
+                }
+            }
+            $conversation->setBcc($thread->getBccArray());
+            $conversation->last_reply_at = $now;
+            $conversation->last_reply_from = Conversation::PERSON_USER;
+            $conversation->user_updated_at = $now;
+            if ($thread->has_attachments) {
+                $conversation->has_attachments = true;
+            }
+            $conversation->updateFolder();
+            // A thread published from a draft is not counted by ThreadObserver.
+            $conversation->threads_count++;
+            $conversation->setPreview($thread->body);
+            $conversation->save();
+
+            $thread->type = Thread::TYPE_MESSAGE;
+            $thread->created_at = $now;
+            $thread->user_id = $conversation->user_id;
+            $thread->status = $conversation->status;
+            $thread->state = Thread::STATE_PUBLISHED;
+            $thread->customer_id = $conversation->customer_id;
+            $thread->created_by_user_id = $user->id;
+            $thread->edited_by_user_id = null;
+            $thread->edited_at = null;
+            $thread->save();
+
+            return $thread;
+        });
+        if ($sent instanceof \Illuminate\Http\JsonResponse) {
+            return $sent;
+        }
+
+        $conversation->maybeRemoveFromDrafts();
+        $conversation->mailbox->updateFoldersCounters();
+        if ($conversation->state != $prevState) {
+            \Eventy::action('conversation.state_changed', $conversation, $user, $prevState);
+        }
+
+        if ($isNewConversation) {
+            event(new UserCreatedConversation($conversation, $thread));
+            \Eventy::action('conversation.created_by_user', $conversation, $thread);
+        } else {
+            if ($conversation->user_id && $conversation->user_id != $user->id) {
+                $user->followConversation($conversation->id);
+            }
+            event(new UserReplied($conversation, $thread));
+            \Eventy::action('conversation.user_replied', $conversation, $thread);
+        }
+
+        return response()->json([
+            'ok'           => true,
+            'sent'         => true,
+            'thread_id'    => $thread->id,
+            'conversation' => $this->summarize($conversation->fresh()),
+        ]);
+    }
+
+    /**
+     * Forwards a conversation. As a draft, it is what the Forward button saves:
+     * a draft thread with SUBTYPE_FORWARD in this conversation, the
+     * conversation's files copied onto it. Sent right away, it is FreeScout's
+     * own Conversation::forward.
+     */
+    public function forward(Request $request, $id)
+    {
+        $conversation = $this->findConversation($request, $id);
+        if ($conversation instanceof \Illuminate\Http\JsonResponse) {
+            return $conversation;
+        }
+        $user = $this->actingUser($request);
+        if ($conversation->state != Conversation::STATE_PUBLISHED) {
+            return response()->json(['error' => 'an unsent draft cannot be forwarded'], 422);
+        }
+
+        $input = $this->draftInput($request, ['to', 'cc', 'bcc', 'body', 'attachments']);
+        if ($input instanceof \Illuminate\Http\JsonResponse) {
+            return $input;
+        }
+        if (!count($input['to'])) {
+            return response()->json(['error' => 'no recipient'], 422);
+        }
+        $payload = $this->draftPayload($request);
+        $send = !empty($payload['send']);
+        $includeAttachments = !array_key_exists('include_attachments', $payload) || !empty($payload['include_attachments']);
+
+        if ($send) {
+            if (count($input['to']) != 1) {
+                return response()->json(['error' => 'forward to one address at a time when sending right away'], 422);
+            }
+            if (count($input['attachments'])) {
+                return response()->json(['error' => 'extra attachments only on a forward draft; send it from there'], 422);
+            }
+            $before = Thread::where('conversation_id', $conversation->id)->max('id');
+            $conversation->forward($user, $input['body'], $input['to'][0], ['cc' => $input['cc'], 'bcc' => $input['bcc']], $includeAttachments);
+
+            $note = Thread::where('conversation_id', $conversation->id)
+                ->where('id', '>', (int) $before)
+                ->where('subtype', Thread::SUBTYPE_FORWARD)
+                ->orderBy('id', 'desc')
+                ->first();
+            $childId = $note ? $note->getMeta(Thread::META_FORWARD_CHILD_CONVERSATION_ID) : null;
+
+            return response()->json([
+                'ok'                        => true,
+                'sent'                      => true,
+                'forwarded_conversation_id' => $childId,
+                'conversation'              => $this->summarize($conversation->fresh()),
+            ]);
+        }
+
+        return $this->writeDraft(function () use ($conversation, $user, $input, $includeAttachments) {
+            $thread = new Thread();
+            $thread->conversation_id = $conversation->id;
+            $thread->user_id = $user->id;
+            $thread->type = Thread::TYPE_MESSAGE;
+            $thread->subtype = Thread::SUBTYPE_FORWARD;
+            $thread->state = Thread::STATE_DRAFT;
+            $thread->source_via = Thread::PERSON_USER;
+            $thread->source_type = Thread::SOURCE_TYPE_WEB;
+            if ($conversation->customer_id) {
+                $thread->customer_id = $conversation->customer_id;
+            }
+            $thread->created_by_user_id = $user->id;
+            $thread->from = null;
+            $thread->body = $input['body'];
+            $thread->setTo($input['to']);
+            $thread->setCc($input['cc']);
+            $thread->setBcc($input['bcc']);
+            $thread->save();
+
+            if ($includeAttachments) {
+                // What load_attachments does for a forward: copies, so the
+                // original files survive whatever happens to the draft.
+                foreach ($conversation->getReplies() as $reply) {
+                    foreach ($reply->attachments as $attachment) {
+                        $attachment->duplicate($thread->id);
+                    }
+                }
+            }
+            $this->storeAttachments($input['attachments'], $thread, $user);
+            $thread->has_attachments = Attachment::where('thread_id', $thread->id)->where('embedded', false)->exists();
+            $thread->save();
+
+            $conversation->addToFolder(Folder::TYPE_DRAFTS);
+            $conversation->mailbox->updateFoldersCounters(Folder::TYPE_DRAFTS);
+            event(new UserCreatedThreadDraft($conversation, $thread));
+
+            return $thread;
+        });
+    }
+
+    /**
+     * Moves a conversation to another mailbox — Conversation::moveToMailbox,
+     * what the Move menu calls.
+     */
+    public function move(Request $request, $id)
+    {
+        $conversation = $this->findConversation($request, $id);
+        if ($conversation instanceof \Illuminate\Http\JsonResponse) {
+            return $conversation;
+        }
+        $user = $this->actingUser($request);
+
+        $mailbox = Mailbox::find((int) $request->input('mailbox_id'));
+        if (!$mailbox) {
+            return response()->json(['error' => 'mailbox not found'], 404);
+        }
+        if (!$this->visibleMailboxes($user)->contains('id', $mailbox->id)) {
+            return response()->json(['error' => 'no access to the target mailbox'], 403);
+        }
+        if ($mailbox->id == $conversation->mailbox_id) {
+            return response()->json(['error' => 'the conversation is already in this mailbox'], 422);
+        }
+
+        $conversation->moveToMailbox($mailbox, $user);
 
         return response()->json(['ok' => true, 'conversation' => $this->summarize($conversation->fresh())]);
+    }
+
+    /**
+     * Merges other conversations into this one — Conversation::mergeConversations,
+     * what the Merge dialog calls. The others end up in Deleted.
+     */
+    public function merge(Request $request, $id)
+    {
+        $conversation = $this->findConversation($request, $id);
+        if ($conversation instanceof \Illuminate\Http\JsonResponse) {
+            return $conversation;
+        }
+        $user = $this->actingUser($request);
+
+        $ids = $request->input('merge_ids');
+        if (!is_array($ids) || !count($ids)) {
+            return response()->json(['error' => 'merge_ids must be a non-empty list'], 422);
+        }
+        $others = [];
+        foreach (array_unique(array_map('intval', $ids)) as $otherId) {
+            if ($otherId == $conversation->id) {
+                return response()->json(['error' => 'a conversation cannot be merged with itself'], 422);
+            }
+            $other = $this->findConversation($request, $otherId);
+            if ($other instanceof \Illuminate\Http\JsonResponse) {
+                return response()->json(['error' => '#'.$otherId.': '.$other->getData(true)['error']], $other->status());
+            }
+            if ($other->state != Conversation::STATE_PUBLISHED) {
+                return response()->json(['error' => '#'.$otherId.' cannot be merged (draft or deleted)'], 422);
+            }
+            $others[] = $other;
+        }
+
+        foreach ($others as $other) {
+            $conversation->mergeConversations($other, $user);
+        }
+
+        return response()->json([
+            'ok'           => true,
+            'merged'       => array_map(function ($c) { return $c->id; }, $others),
+            'conversation' => $this->summarize($conversation->fresh()),
+        ]);
+    }
+
+    /**
+     * Customers by name, company or address, with their latest conversations
+     * in the mailboxes the acting user can see.
+     */
+    public function customers(Request $request)
+    {
+        $user = $this->actingUser($request);
+        if ($user instanceof \Illuminate\Http\JsonResponse) {
+            return $user;
+        }
+        $q = trim((string) $request->input('query', ''));
+        if (mb_strlen($q) < 2) {
+            return response()->json(['error' => 'query needs at least two characters'], 422);
+        }
+        $like = '%'.mb_strtolower($q).'%';
+        $mailboxIds = $this->visibleMailboxes($user)->pluck('id')->all();
+        $limited = config('app.limit_user_customer_visibility') && !$user->isAdmin();
+
+        $customers = Customer::where(function ($w) use ($like) {
+            $w->where('first_name', 'like', $like)
+                ->orWhere('last_name', 'like', $like)
+                ->orWhere(\DB::raw('CONCAT(first_name, " ", last_name)'), 'like', $like)
+                ->orWhere('company', 'like', $like)
+                ->orWhereIn('id', function ($sub) use ($like) {
+                    $sub->select('customer_id')->from('emails')->where('email', 'like', $like);
+                });
+        })->orderBy('id', 'desc')->limit(20)->get();
+
+        $result = [];
+        foreach ($customers as $customer) {
+            $conversations = Conversation::where('customer_id', $customer->id)
+                ->whereIn('mailbox_id', $mailboxIds)
+                ->where('state', Conversation::STATE_PUBLISHED)
+                ->orderBy('last_reply_at', 'desc')
+                ->limit(10)
+                ->get();
+            if ($limited && !count($conversations)) {
+                continue;
+            }
+            $result[] = [
+                'id'            => $customer->id,
+                'name'          => $customer->getFullName(),
+                'emails'        => $customer->emails->pluck('email')->values(),
+                'company'       => $customer->company,
+                'job_title'     => $customer->job_title,
+                'phones'        => $customer->getPhones(),
+                'conversations' => $conversations->map(function ($conversation) {
+                    return $this->summarize($conversation);
+                })->values(),
+            ];
+        }
+
+        return response()->json(['customers' => $result]);
     }
 
     public function note(Request $request, $id)
@@ -499,20 +916,31 @@ class BridgeController extends Controller
     }
 
     /**
-     * Runs the writes of a draft in one transaction, so a failure (a full
-     * disk, say) leaves no half draft behind.
+     * Runs writes in one transaction, so a failure (a full disk, say) leaves
+     * nothing half-written behind. Returns the callable's result, or an error
+     * response.
      */
-    protected function writeDraft(callable $write)
+    protected function transaction(callable $write)
     {
         \DB::beginTransaction();
         try {
-            $thread = $write();
+            $result = $write();
             \DB::commit();
         } catch (\Throwable $e) {
             \DB::rollBack();
-            \Log::error('[mcp] storing a draft failed: '.$e->getMessage());
+            \Log::error('[mcp] writing failed: '.$e->getMessage());
 
-            return response()->json(['error' => 'the draft could not be stored'], 500);
+            return response()->json(['error' => 'the helpdesk could not store this'], 500);
+        }
+
+        return $result;
+    }
+
+    protected function writeDraft(callable $write)
+    {
+        $thread = $this->transaction($write);
+        if ($thread instanceof \Illuminate\Http\JsonResponse) {
+            return $thread;
         }
 
         return response()->json(['ok' => true, 'draft' => $this->describeDraft($thread->fresh())]);

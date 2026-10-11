@@ -17,5 +17,10 @@ Route::group([
     Route::post('drafts', 'BridgeController@createConversationDraft');
     Route::post('drafts/{id}', 'BridgeController@updateDraft');
     Route::post('drafts/{id}/delete', 'BridgeController@deleteDraft');
+    Route::post('drafts/{id}/send', 'BridgeController@sendDraft');
+    Route::post('conversations/{id}/forward', 'BridgeController@forward');
+    Route::post('conversations/{id}/move', 'BridgeController@move');
+    Route::post('conversations/{id}/merge', 'BridgeController@merge');
+    Route::get('customers', 'BridgeController@customers');
     Route::get('attachments/{id}', 'BridgeController@attachment');
 });

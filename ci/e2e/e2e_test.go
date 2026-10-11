@@ -64,6 +64,9 @@ type seed struct {
 	ImgAttachment  int    `json:"image_attachment_id"`
 	ImageBase64    string `json:"image_base64"`
 	ColleagueDraft int    `json:"colleague_draft_id"`
+	SecondMailbox  int    `json:"second_mailbox_id"`
+	MergeConv      int    `json:"merge_conversation_id"`
+	MoveConv       int    `json:"move_conversation_id"`
 }
 
 var (
@@ -403,7 +406,8 @@ func TestToolsListOffersTheWholeSurface(t *testing.T) {
 	}
 	for _, want := range []string{"list_mailboxes", "search_conversations", "get_conversation",
 		"reply_to_conversation", "add_note", "set_status", "assign_conversation",
-		"create_draft", "create_new_draft", "update_draft", "delete_draft"} {
+		"create_draft", "create_new_draft", "update_draft", "delete_draft",
+		"send_draft", "forward_conversation", "find_customers", "move_conversation", "merge_conversations"} {
 		if !found[want] {
 			t.Fatalf("tool %s missing from tools/list", want)
 		}
@@ -1123,4 +1127,267 @@ func fetchPage(t *testing.T, address string) string {
 		t.Fatalf("%s answered %d", address, res.StatusCode)
 	}
 	return string(body)
+}
+
+// ---- Sending, forwarding, search, customers, move, merge -------------------
+
+const (
+	stateDeleted   = 3
+	subtypeForward = 1
+)
+
+// waitForMail waits until FreeScout has handed a message for this thread to
+// its mail queue (there is no SMTP server, so it goes no further).
+func waitForMail(t *testing.T, threadID int) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	needle := fmt.Sprintf("%%i:%d;%%", threadID)
+	for {
+		queued := queryInt(t, fmt.Sprintf("select count(*) from jobs where payload like '%%SendReplyToCustomer%%' and payload like '%s'", needle)) +
+			queryInt(t, fmt.Sprintf("select count(*) from failed_jobs where payload like '%%SendReplyToCustomer%%' and payload like '%s'", needle)) +
+			queryInt(t, fmt.Sprintf("select count(*) from threads where id = %d and send_status is not null", threadID))
+		if queued > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("thread %d was never handed to the mail queue", threadID)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func TestReplyWithCcAndAttachment(t *testing.T) {
+	fixture := seeded(t)
+	id := fixture.ConversationID
+
+	text := callTool(t, "reply_to_conversation", map[string]any{
+		"id":          id,
+		"body":        "Anbei der Lieferschein.",
+		"cc":          []string{"statik@example.org"},
+		"bcc":         "archiv@example.org",
+		"attachments": []map[string]any{{"filename": "lieferschein.txt", "content_base64": base64.StdEncoding.EncodeToString([]byte("Lieferschein 42"))}},
+	})
+	var out struct {
+		ThreadID    int `json:"thread_id"`
+		Attachments []struct {
+			ID   int    `json:"id"`
+			Name string `json:"name"`
+		} `json:"attachments"`
+	}
+	_ = json.Unmarshal([]byte(text), &out)
+	if out.ThreadID <= 0 || len(out.Attachments) != 1 {
+		t.Fatalf("unexpected answer: %s", text)
+	}
+	row := query(t, fmt.Sprintf("select state, type, has_attachments from threads where id = %d", out.ThreadID))
+	if row != fmt.Sprintf("%d\t%d\t1", statePublished, threadTypeMessage) {
+		t.Fatalf("reply thread %q", row)
+	}
+	if cc := query(t, fmt.Sprintf("select cc from threads where id = %d", out.ThreadID)); !strings.Contains(cc, "statik@example.org") {
+		t.Fatalf("cc missing: %q", cc)
+	}
+	if bcc := query(t, fmt.Sprintf("select bcc from threads where id = %d", out.ThreadID)); !strings.Contains(bcc, "archiv@example.org") {
+		t.Fatalf("bcc missing: %q", bcc)
+	}
+	if got := attachmentBytes(t, out.Attachments[0].ID); string(got) != "Lieferschein 42" {
+		t.Fatalf("attachment content %q", got)
+	}
+	waitForMail(t, out.ThreadID)
+}
+
+func TestSendDraftSendsWhatIsStored(t *testing.T) {
+	fixture := seeded(t)
+	id := fixture.ConversationID
+	countBefore := queryInt(t, fmt.Sprintf("select threads_count from conversations where id = %d", id))
+
+	draft := callDraftTool(t, "create_draft", map[string]any{
+		"id": id, "body": "Entwurf, geprüft und freigegeben.",
+		"attachments": []map[string]any{{"filename": "freigabe.txt", "content_base64": base64.StdEncoding.EncodeToString([]byte("ok"))}},
+	})
+	tid := draft.Draft.DraftID
+	// A person edits the draft in FreeScout before it goes out.
+	query(t, fmt.Sprintf("update threads set body = 'Von Hand korrigiert.' where id = %d", tid))
+
+	callTool(t, "send_draft", map[string]any{"draft_id": tid})
+
+	if row := query(t, fmt.Sprintf("select state, type, body from threads where id = %d", tid)); row != fmt.Sprintf("%d\t%d\tVon Hand korrigiert.", statePublished, threadTypeMessage) {
+		t.Fatalf("the sent draft is %q", row)
+	}
+	if got := queryInt(t, fmt.Sprintf("select threads_count from conversations where id = %d", id)); got != countBefore+1 {
+		t.Fatalf("threads_count %d -> %d", countBefore, got)
+	}
+	if got := queryInt(t, fmt.Sprintf("select count(*) from attachments where thread_id = %d", tid)); got != 1 {
+		t.Fatalf("the draft's attachment did not stay with the sent message")
+	}
+	waitForMail(t, tid)
+
+	if text := callToolExpectingError(t, "send_draft", map[string]any{"draft_id": tid}); !strings.Contains(text, "not a draft") {
+		t.Fatalf("sending twice: %q", text)
+	}
+	if text := callToolExpectingError(t, "send_draft", map[string]any{"draft_id": fixture.ColleagueDraft}); !strings.Contains(text, "someone else") {
+		t.Fatalf("someone else's draft: %q", text)
+	}
+}
+
+func TestSendNewConversationDraft(t *testing.T) {
+	fixture := seeded(t)
+	draft := callDraftTool(t, "create_new_draft", map[string]any{
+		"mailbox_id": fixture.MailboxID,
+		"to":         []string{"architekt@example.org", "bauamt@example.org"},
+		"subject":    "Termin Baubeginn",
+		"body":       "Guten Tag,\n\nder Baubeginn ist am 1. März.",
+	})
+	cid, tid := draft.Draft.ConversationID, draft.Draft.DraftID
+
+	callTool(t, "send_draft", map[string]any{"draft_id": tid, "status": "pending"})
+
+	row := query(t, fmt.Sprintf("select state, status, customer_email, customer_id is not null from conversations where id = %d", cid))
+	if row != fmt.Sprintf("%d\t%d\tarchitekt@example.org\t1", statePublished, statusPending) {
+		t.Fatalf("the sent conversation is %q", row)
+	}
+	if cc := query(t, fmt.Sprintf("select cc from conversations where id = %d", cid)); !strings.Contains(cc, "bauamt@example.org") {
+		t.Fatalf("the second recipient did not end up in cc, as FreeScout does it: %q", cc)
+	}
+	if got := queryInt(t, fmt.Sprintf("select state from threads where id = %d", tid)); got != statePublished {
+		t.Fatalf("thread state %d", got)
+	}
+	if got := queryInt(t, fmt.Sprintf(
+		"select count(*) from conversation_folder cf join folders f on f.id = cf.folder_id where cf.conversation_id = %d and f.type = %d", cid, folderDrafts)); got != 0 {
+		t.Fatalf("the sent conversation is still in Drafts")
+	}
+	if search := callTool(t, "search_conversations", map[string]any{"query": "Termin Baubeginn"}); !strings.Contains(search, "Termin Baubeginn") {
+		t.Fatalf("the sent conversation is not searchable")
+	}
+	waitForMail(t, tid)
+}
+
+func TestForwardAsDraftCopiesTheAttachments(t *testing.T) {
+	fixture := seeded(t)
+	id := fixture.ConversationID
+
+	draft := callDraftTool(t, "forward_conversation", map[string]any{
+		"id": id, "to": "statik@example.org", "body": "Zur Info.",
+	})
+	tid := draft.Draft.DraftID
+	row := query(t, fmt.Sprintf("select state, subtype, conversation_id from threads where id = %d", tid))
+	if row != fmt.Sprintf("%d\t%d\t%d", stateDraft, subtypeForward, id) {
+		t.Fatalf("forward draft %q", row)
+	}
+	names := []string{}
+	for _, a := range draft.Draft.Attachments {
+		names = append(names, a.Name)
+	}
+	joined := strings.Join(names, ",")
+	if !strings.Contains(joined, "angebot.txt") || !strings.Contains(joined, "dach.png") {
+		t.Fatalf("the conversation's files were not copied onto the forward draft: %v", names)
+	}
+	for _, a := range draft.Draft.Attachments {
+		if a.ID == fixture.TextAttachment || a.ID == fixture.ImgAttachment {
+			t.Fatalf("the draft took the original attachment instead of a copy")
+		}
+	}
+	if text := callToolExpectingError(t, "send_draft", map[string]any{"draft_id": tid}); !strings.Contains(text, "forward") {
+		t.Fatalf("send_draft on a forward draft: %q", text)
+	}
+	if got := query(t, fmt.Sprintf("select state, coalesce(send_status, 'null') from threads where id = %d", tid)); got != fmt.Sprintf("%d\tnull", stateDraft) {
+		t.Fatalf("the forward draft went out: %q", got)
+	}
+	callTool(t, "delete_draft", map[string]any{"draft_id": tid})
+	for _, original := range []int{fixture.TextAttachment, fixture.ImgAttachment} {
+		if got := queryInt(t, fmt.Sprintf("select count(*) from attachments where id = %d", original)); got != 1 {
+			t.Fatalf("discarding the forward draft removed an original attachment")
+		}
+	}
+}
+
+func TestForwardRightAway(t *testing.T) {
+	fixture := seeded(t)
+	text := callTool(t, "forward_conversation", map[string]any{
+		"id": fixture.ConversationID, "to": "statik@example.org", "body": "Bitte prüfen.", "send": true,
+	})
+	var out struct {
+		Forwarded int `json:"forwarded_conversation_id"`
+	}
+	_ = json.Unmarshal([]byte(text), &out)
+	if out.Forwarded <= 0 {
+		t.Fatalf("no forwarded conversation in %s", text)
+	}
+	row := query(t, fmt.Sprintf("select customer_email, subject, has_attachments from conversations where id = %d", out.Forwarded))
+	if row != "statik@example.org\tFwd: Lieferung Dach\t1" {
+		t.Fatalf("forwarded conversation %q", row)
+	}
+	tid := queryInt(t, fmt.Sprintf("select id from threads where conversation_id = %d order by id desc limit 1", out.Forwarded))
+	if got := queryInt(t, fmt.Sprintf("select count(*) from attachments where thread_id = %d", tid)); got < 2 {
+		t.Fatalf("the attachments were not forwarded (%d)", got)
+	}
+	waitForMail(t, tid)
+}
+
+func TestSearchFindsMessageTextAndFilters(t *testing.T) {
+	fixture := seeded(t)
+
+	// Only in the customer's message, not in subject or preview of every row.
+	if got := callTool(t, "search_conversations", map[string]any{"query": "Rechnung zum Dach"}); !strings.Contains(got, "Rechnung Dach") {
+		t.Fatalf("message text is not searched: %s", truncate(got))
+	}
+	if got := callTool(t, "search_conversations", map[string]any{"from": fixture.CustomerEmail, "mailbox_id": fixture.MailboxID}); !strings.Contains(got, "Lieferung Dach") {
+		t.Fatalf("from filter: %s", truncate(got))
+	}
+	for _, args := range []map[string]any{
+		{"from": "niemand@example.org"},
+		{"after": "2999-01-01"},
+		{"before": "2000-01-01"},
+		{"query": "Dach", "status": "spam"},
+	} {
+		if got := callTool(t, "search_conversations", args); !strings.Contains(got, `"total": 0`) {
+			t.Fatalf("%v should match nothing: %s", args, truncate(got))
+		}
+	}
+	callToolExpectingError(t, "search_conversations", map[string]any{"after": "letzte Woche"})
+
+	draft := callDraftTool(t, "create_new_draft", map[string]any{
+		"mailbox_id": fixture.MailboxID, "to": "a@example.org", "subject": "Nur ein Entwurf", "body": "x",
+	})
+	if got := callTool(t, "search_conversations", map[string]any{"state": "draft"}); !strings.Contains(got, "Nur ein Entwurf") {
+		t.Fatalf("state=draft does not list drafts: %s", truncate(got))
+	}
+	callTool(t, "delete_draft", map[string]any{"draft_id": draft.Draft.DraftID})
+}
+
+func TestFindCustomers(t *testing.T) {
+	got := callTool(t, "find_customers", map[string]any{"query": "Kundin"})
+	for _, want := range []string{"kundin@example.com", "Kirsten Kundin", "Lieferung Dach"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q missing: %s", want, truncate(got))
+		}
+	}
+	if got := callTool(t, "find_customers", map[string]any{"query": "kundin@example"}); !strings.Contains(got, "Kirsten") {
+		t.Fatalf("search by address: %s", truncate(got))
+	}
+}
+
+func TestMoveConversation(t *testing.T) {
+	fixture := seeded(t)
+	callTool(t, "move_conversation", map[string]any{"id": fixture.MoveConv, "mailbox_id": fixture.SecondMailbox})
+	if got := queryInt(t, fmt.Sprintf("select mailbox_id from conversations where id = %d", fixture.MoveConv)); got != fixture.SecondMailbox {
+		t.Fatalf("mailbox_id %d", got)
+	}
+	if got := queryInt(t, fmt.Sprintf("select count(*) from threads where conversation_id = %d and type = 4", fixture.MoveConv)); got != 1 {
+		t.Fatalf("FreeScout's history line for the move is missing")
+	}
+	callToolExpectingError(t, "move_conversation", map[string]any{"id": fixture.MoveConv, "mailbox_id": 999999})
+}
+
+func TestMergeConversations(t *testing.T) {
+	fixture := seeded(t)
+	threads := queryInt(t, fmt.Sprintf("select count(*) from threads where conversation_id = %d", fixture.MergeConv))
+
+	callToolExpectingError(t, "merge_conversations", map[string]any{"id": fixture.ConversationID, "merge_ids": []int{fixture.ConversationID}})
+	callTool(t, "merge_conversations", map[string]any{"id": fixture.ConversationID, "merge_ids": []int{fixture.MergeConv}})
+
+	if got := queryInt(t, fmt.Sprintf("select state from conversations where id = %d", fixture.MergeConv)); got != stateDeleted {
+		t.Fatalf("the merged conversation was not deleted: state %d", got)
+	}
+	if got := queryInt(t, fmt.Sprintf("select count(*) from threads where conversation_id = %d and body like '%%Rechnung zum Dach%%'", fixture.ConversationID)); got != 1 || threads < 1 {
+		t.Fatalf("the merged messages did not move over")
+	}
 }

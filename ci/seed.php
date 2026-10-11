@@ -144,6 +144,61 @@ $colleagueDraft->setTo('kundin@example.com');
 $colleagueDraft->save();
 $conversation->addToFolder(App\Folder::TYPE_DRAFTS);
 
+// Two more plain conversations of the same customer, one to merge and one to
+// move, and a second mailbox to move it to.
+function seed_conversation($mailbox, $customer, $subject, $body)
+{
+    $now = date('Y-m-d H:i:s');
+    $c = new Conversation();
+    $c->type = Conversation::TYPE_EMAIL;
+    $c->state = Conversation::STATE_PUBLISHED;
+    $c->status = Conversation::STATUS_ACTIVE;
+    $c->subject = $subject;
+    $c->setPreview($body);
+    $c->mailbox_id = $mailbox->id;
+    $c->customer_id = $customer->id;
+    $c->created_by_customer_id = $customer->id;
+    $c->customer_email = 'kundin@example.com';
+    $c->source_via = Conversation::PERSON_CUSTOMER;
+    $c->source_type = Conversation::SOURCE_TYPE_EMAIL;
+    $c->setLastReplyAt($now, Conversation::PERSON_CUSTOMER);
+    $c->last_reply_from = Conversation::PERSON_CUSTOMER;
+    $c->updateFolder();
+    $c->save();
+
+    $t = new Thread();
+    $t->conversation_id = $c->id;
+    $t->type = Thread::TYPE_CUSTOMER;
+    $t->status = $c->status;
+    $t->state = Thread::STATE_PUBLISHED;
+    $t->body = $body;
+    $t->from = 'kundin@example.com';
+    $t->setTo([$mailbox->email]);
+    $t->source_via = Thread::PERSON_CUSTOMER;
+    $t->source_type = Thread::SOURCE_TYPE_EMAIL;
+    $t->customer_id = $customer->id;
+    $t->created_by_customer_id = $customer->id;
+    $t->first = true;
+    $t->save();
+
+    return $c;
+}
+
+$secondMailbox = Mailbox::where('email', 'planung@example.org')->first();
+if (!$secondMailbox) {
+    $secondMailbox = Mailbox::create([
+        'name'      => 'Planung',
+        'email'     => 'planung@example.org',
+        'from_name' => Mailbox::FROM_NAME_MAILBOX,
+    ]);
+}
+$secondMailbox->users()->sync([$admin->id]);
+$secondMailbox->syncPersonalFolders([$admin->id]);
+
+$mergeConversation = seed_conversation($mailbox, $customer, 'Rechnung Dach', '<div>Anbei die Rechnung zum Dach.</div>');
+$moveConversation = seed_conversation($mailbox, $customer, 'Fenster Planung', '<div>Wann planen wir die Fenster?</div>');
+$secondMailbox->updateFoldersCounters();
+
 $mailbox->updateFoldersCounters();
 
 echo json_encode([
@@ -157,4 +212,7 @@ echo json_encode([
     'image_attachment_id' => $imageAttachment ? $imageAttachment->id : null,
     'image_base64'        => base64_encode($pngBytes),
     'colleague_draft_id'  => $colleagueDraft->id,
+    'second_mailbox_id'   => $secondMailbox->id,
+    'merge_conversation_id' => $mergeConversation->id,
+    'move_conversation_id'  => $moveConversation->id,
 ], JSON_PRETTY_PRINT)."\n";
