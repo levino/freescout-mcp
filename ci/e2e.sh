@@ -59,6 +59,9 @@ up() {
   echo "seeding"
   "${COMPOSE[@]}" exec -T freescout php /ci/seed.php > "$STAGE/seed.json"
   cat "$STAGE/seed.json"
+  # The seed runs as root, so the attachment folders it created belong to
+  # root; FreeScout itself writes there as the web server's user.
+  "${COMPOSE[@]}" exec -T freescout sh -c 'chmod -R a+rwX /data/storage/app'
 
   echo "starting the fake login provider and the MCP server inside the container"
   "${COMPOSE[@]}" exec -d \
