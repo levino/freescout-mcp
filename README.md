@@ -48,6 +48,8 @@ no account, there is no token. Nobody is created automatically.
 | `forward_conversation` | Saves a forward draft (default) or, with `send`, **sends** the forward |
 | `add_note`, `set_status`, `assign_conversation` | Internal note, status, assignee |
 | `move_conversation`, `merge_conversations` | Move to another mailbox, merge into one conversation |
+| `token` | A one-hour bearer token for the [REST API](#rest-api), acting as the connected user |
+| `api` | Short guide to the REST API with curl examples |
 
 Only `reply_to_conversation`, `send_draft` and `forward_conversation` with
 `send: true` send email. The mailbox signature is never part of the text: FreeScout
@@ -67,17 +69,86 @@ a draft exactly the way FreeScout's own editor does when it saves one
 in the mailbox's Drafts folder. No `UserReplied` event, nothing in the mail
 queue. A person opens the draft in FreeScout, checks it and clicks Send.
 
-Attachments (`[{filename, content_base64 | url, mime_type?}]`, at most 20 files
+Attachments (`[{filename, upload_id | url | content_base64, mime_type?}]`, at most 20 files
 and 20 MB together) go through `Attachment::create` like an upload from the
 editor: the file lands in FreeScout's private storage
 (`storage/app/attachment/…`), the row in `attachments`, bound to the draft
 thread, so it shows in the editor and goes out with the mail. A `url` is
 downloaded by the MCP server, https only, and never from loopback, private or
-link-local addresses.
+link-local addresses. An `upload_id` names a file uploaded through the REST API
+(`POST /mcp/api/v1/uploads`) — the way to attach a local file without writing
+it into the tool call as base64.
 
 `update_draft` and `delete_draft` only touch drafts the connected user created.
 `get_conversation` marks unsent drafts with `"draft": true`; their thread id is
 the `draft_id`.
+
+## REST API
+
+Everything the tools do is also a REST API under `/mcp/api/v1` on the same
+host, described as OpenAPI 3 at `/mcp/api/v1/openapi.json`. The MCP connection
+stays the way in: the `token` tool hands out a bearer token for the API, valid
+one hour, carrying the same user (and OAuth client and scope) as the MCP
+session. MCP access tokens and API tokens are different kinds and neither opens
+the other door. Every call acts as that FreeScout user through the same bridge,
+with the same checks; the tools and the routes run the same Go functions
+(`server/ops.go`).
+
+| Route | Tool |
+| --- | --- |
+| `GET /mailboxes` | `list_mailboxes` |
+| `GET /conversations?query=&…&fields=a,b` | `search_conversations` |
+| `GET /conversations/{id}?fields=&last_threads=` | `get_conversation` |
+| `POST /conversations/{id}/drafts` | `create_draft` |
+| `POST /conversations/{id}/reply` | `reply_to_conversation` (**sends**) |
+| `POST /conversations/{id}/forward` | `forward_conversation` (**sends** with `send=true`) |
+| `POST /conversations/{id}/notes`, `…/status`, `…/assign`, `…/move`, `…/merge` | the tools of the same name |
+| `POST /drafts`, `PATCH /drafts/{id}`, `DELETE /drafts/{id}` | `create_new_draft`, `update_draft`, `delete_draft` |
+| `POST /drafts/{id}/send` | `send_draft` (**sends**) |
+| `GET /customers?query=` | `find_customers` |
+| `GET /attachments/{id}` | `get_attachment`, as the file itself |
+| `POST /uploads`, `DELETE /uploads/{id}` | temporary upload for `upload_id` |
+| `GET /me` | who the token acts as |
+
+Write routes take the tool's fields as JSON, or as multipart form fields (all
+of them as JSON in a field `payload`, or one field each; a repeated field is a
+list). Every file part of a multipart request is an attachment. Errors are
+`{"error": "…"}`: 400 for bad arguments, 401 for a missing or expired token,
+FreeScout's own 403/404/422, 413 above 20 MB, 429 when the upload quota is
+full, 502 when FreeScout does not answer.
+
+```bash
+# A new email as a draft, with a PDF — nothing is sent.
+curl -H "Authorization: Bearer $TOKEN" \
+  -F mailbox_id=1 -F to=kunde@example.org -F subject='Ihr Angebot' \
+  -F body='Guten Tag, anbei das Angebot.' -F file=@angebot.pdf \
+  https://shared-inbox.levinkeller.de/mcp/api/v1/drafts
+```
+
+Uploads (`POST /uploads`) wait in a private directory of the sidecar, owned by
+the user who sent them, for one hour or until a draft, reply or forward uses
+them; then FreeScout stores the file and the upload is deleted. At most 20
+pending files and 100 MB per user. The directory is emptied on start.
+
+### Why both, and what goes where
+
+MCP is how Claude finds the helpdesk and logs in; every MCP client speaks it,
+including claude.ai without a shell. But everything a tool returns lands in
+the model's context, and everything it sends has to be written out by the
+model token by token — a 700 KB PDF as base64 is a million tokens nobody can
+afford. A client that can run commands does better with plain HTTP: curl
+streams files from disk, writes downloads to disk, and a script can work
+through a hundred conversations without the model reading each answer.
+
+So the split is:
+
+- **MCP**: logging in, `token` and `api`, and lean tools for working without a
+  shell — search with a compact hit list (`fields` for more), reading a
+  conversation (`last_threads` for long ones), drafts, replies, notes, status.
+  Tool answers are compact JSON. Base64 and URLs for attachments remain for
+  small generated files and for clients without a shell.
+- **REST**: files (multipart upload, attachments as bytes) and anything in
+  bulk. Same operations, same rights, same limits.
 
 ## Configuration
 
@@ -95,6 +166,7 @@ the `draft_id`.
 | `OIDC_SCOPES` | no | Default `openid profile email`. |
 | `TOKEN_SIGNING_KEY` | yes | At least 32 bytes. Tokens are HMAC-signed, so a restart keeps connections alive and no database is needed. |
 | `APP_NAME` | no | Shown on the consent page. |
+| `UPLOAD_DIR` | no | Where REST uploads wait, at most an hour. Emptied on start. Default `$TMPDIR/freescout-mcp-uploads`. |
 | `INSECURE_ALLOW_LOCAL_CLIENTS` | no | Tests only. Allows client metadata documents and attachment URLs on loopback and private addresses, and over plain http. |
 
 ### FreeScout modules

@@ -85,7 +85,13 @@ func newFakeBridge(t *testing.T, users ...string) *fakeBridge {
 		case "mailboxes":
 			writeJSON(w, 200, map[string]any{"mailboxes": []map[string]any{{"id": 1, "name": "Ökohaus"}}})
 		case "conversations":
-			writeJSON(w, 200, map[string]any{"total": 1, "conversations": []map[string]any{{"id": 7, "subject": "Dach"}}})
+			writeJSON(w, 200, map[string]any{"total": 1, "conversations": []map[string]any{{"id": 7, "subject": "Dach", "preview": "Lange Vorschau", "status": "active"}}})
+		case "conversations/7":
+			writeJSON(w, 200, map[string]any{"conversation": map[string]any{"id": 7, "subject": "Dach", "preview": "p",
+				"threads": []map[string]any{{"id": 1, "body": "eins"}, {"id": 2, "body": "zwei"}, {"id": 3, "body": "drei"}}}})
+		case "attachments/3":
+			writeJSON(w, 200, map[string]any{"attachment": map[string]any{"id": 3, "name": "plan \"A\".pdf", "mime_type": "application/pdf",
+				"base64": base64.StdEncoding.EncodeToString([]byte("%PDF-1.7 plan"))}})
 		case "conversations/7/reply":
 			writeJSON(w, 200, map[string]any{"ok": true})
 		case "conversations/7/draft", "drafts", "drafts/5", "drafts/5/delete", "drafts/5/send",
@@ -166,6 +172,7 @@ func newTestApp(t *testing.T, bridge *fakeBridge, oidc *httptest.Server, clientI
 		OIDCScopes:   "openid email",
 		SigningKey:   []byte("0123456789abcdef0123456789abcdef"),
 		AppName:      "FreeScout",
+		UploadDir:    t.TempDir(),
 	})
 	app.cimdAllowLocal = true
 

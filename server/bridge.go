@@ -115,7 +115,8 @@ func (b *Bridge) do(req *http.Request, actingUser string) (map[string]any, error
 	}
 	defer res.Body.Close()
 
-	raw, _ := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	// get_attachment answers with up to 20 MB as base64.
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 32<<20))
 	var decoded map[string]any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return nil, &bridgeError{Status: res.StatusCode, Message: "unreadable response from FreeScout"}

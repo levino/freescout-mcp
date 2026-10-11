@@ -67,8 +67,8 @@ func (a *App) mountMcp(mux *http.ServeMux) {
 	mux.HandleFunc("POST /mcp", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 
-		email, ok := a.bearerUser(r)
-		if !ok {
+		session := a.bearerClaims(r, "access")
+		if session == nil {
 			a.wwwAuthenticate(w)
 			writeJSON(w, 401, jsonRPCError(nil, -32001, "missing or invalid token"))
 			return
@@ -90,7 +90,7 @@ func (a *App) mountMcp(mux *http.ServeMux) {
 			return
 		}
 
-		result, rpcErr := a.dispatchRPC(&req, email)
+		result, rpcErr := a.dispatchRPC(&req, session)
 		if rpcErr != nil {
 			writeJSON(w, 200, jsonRPCError(req.ID, rpcErr.code, rpcErr.message))
 			return
@@ -108,7 +108,7 @@ type rpcError struct {
 	message string
 }
 
-func (a *App) dispatchRPC(req *jsonRPCRequest, email string) (any, *rpcError) {
+func (a *App) dispatchRPC(req *jsonRPCRequest, session *tokenClaims) (any, *rpcError) {
 	switch req.Method {
 	case "initialize":
 		return map[string]any{
@@ -131,20 +131,27 @@ func (a *App) dispatchRPC(req *jsonRPCRequest, email string) (any, *rpcError) {
 		if p.Name == "" {
 			return nil, &rpcError{-32602, "tools/call requires name"}
 		}
-		return a.dispatchTool(p.Name, p.Arguments, email), nil
+		return a.dispatchToolFor(p.Name, p.Arguments, session), nil
 	default:
 		return nil, &rpcError{-32601, "unknown method: " + req.Method}
 	}
 }
 
 func (a *App) bearerUser(r *http.Request) (string, bool) {
-	m := bearerRe.FindStringSubmatch(r.Header.Get("Authorization"))
-	if m == nil {
-		return "", false
-	}
-	claims := a.verifyToken(m[1], "access")
+	claims := a.bearerClaims(r, "access")
 	if claims == nil {
 		return "", false
 	}
 	return claims.Subject, true
+}
+
+// bearerClaims checks the Authorization header for a token of this kind:
+// "access" for the MCP endpoint, "api" for the REST API. The kinds do not
+// mix, so neither token opens the other door.
+func (a *App) bearerClaims(r *http.Request, kind string) *tokenClaims {
+	m := bearerRe.FindStringSubmatch(r.Header.Get("Authorization"))
+	if m == nil {
+		return nil
+	}
+	return a.verifyToken(m[1], kind)
 }

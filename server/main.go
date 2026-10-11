@@ -17,13 +17,22 @@ type App struct {
 	mem    *memory
 	cimd   *cimdCache
 	oidc   *oidcState
+	// uploads is nil only in tests that never touch it.
+	uploads *uploadStore
+	// The REST routes as mounted, for the OpenAPI test.
+	apiRoutes []string
 
 	cimdAllowLocal bool
 }
 
 func NewApp(cfg *Config) *App {
 	client := &http.Client{Timeout: 20 * time.Second}
+	uploads, err := newUploadStore(cfg.UploadDir)
+	if err != nil {
+		log.Fatalf("upload directory: %v", err)
+	}
 	return &App{
+		uploads:        uploads,
 		cfg:            cfg,
 		cimdAllowLocal: cfg.InsecureAllowLocalClients,
 		http:           client,
@@ -38,6 +47,7 @@ func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	a.mountOauth(mux)
 	a.mountMcp(mux)
+	a.mountAPI(mux)
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok", "version": version})
@@ -57,6 +67,11 @@ func main() {
 	}
 
 	app := NewApp(cfg)
+	go func() {
+		for range time.Tick(time.Minute) {
+			app.uploads.sweep()
+		}
+	}()
 	server := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           app.Handler(),

@@ -10,6 +10,10 @@ every configuration variable.
   surface besides FreeScout itself. `mcp.go` is the JSON-RPC endpoint, tool
   definitions live in `toolDefs()` and dispatch in `dispatchTool` (`tools.go`).
   Runs as a sidecar in the FreeScout pod.
+- **REST API** (`server/rest.go`, `openapi.go`): the same operations under
+  `/mcp/api/v1` for clients with a shell, with a one-hour token from the MCP
+  tool `token`. Tools and routes share `operation` in `ops.go` — business
+  logic goes there, never into one front end only.
 - **Auth** (`server/oauth.go`, `oauth_routes.go`, `cimd.go`, `oidc.go`): its own
   OAuth 2.1 authorization server for MCP clients — Client ID Metadata Documents
   only (no dynamic registration, public clients with PKCE S256), login
@@ -45,6 +49,11 @@ every configuration variable.
   as JSON in `payload`, files as `files[]`, stored with `Attachment::create`
   like an editor upload. Attachment URLs are fetched by the server with a
   dialer that refuses non-public addresses at connect time.
+- **Token kinds do not mix.** `/mcp` takes only `access` tokens, the REST API
+  only `api` tokens (from the `token` tool, one hour, no refresh). An API
+  token must never be able to mint another one.
+- **REST lives under `/mcp`.** The ingress already sends `/mcp` to the
+  sidecar; `/api` belongs to FreeScout. No ingress change for new routes.
 - **No auto-provisioning.** Both the MCP login and the web login refuse an
   address that has no active FreeScout user. Who gets into the helpdesk stays a
   decision made in the helpdesk.
@@ -96,6 +105,8 @@ MCP server's log and FreeScout's `laravel.log`.
   documentation.
 - The server has no dependencies beyond the standard library. Keep it that way;
   it is what makes the sidecar a single static binary.
-- New tools go into `toolDefs()` and `dispatchTool` together, and the bridge
+- New tools go into `toolDefs()` and `operation` (`ops.go`) together, get a
+  REST route in `mountAPI` and an entry in `openAPI()` (a test compares the
+  two), and the bridge
   route they need goes into `modules/Mcp/Routes/bridge.php` — never a direct
   database query from the server.
