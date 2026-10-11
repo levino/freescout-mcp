@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -50,23 +49,8 @@ type attachmentArg struct {
 	Filename      string `json:"filename"`
 	ContentBase64 string `json:"content_base64"`
 	URL           string `json:"url"`
+	UploadID      string `json:"upload_id"`
 	MimeType      string `json:"mime_type"`
-}
-
-type draftArgs struct {
-	ID                  int64           `json:"id"`
-	DraftID             int64           `json:"draft_id"`
-	MailboxID           int64           `json:"mailbox_id"`
-	To                  emailList       `json:"to"`
-	Cc                  emailList       `json:"cc"`
-	Bcc                 emailList       `json:"bcc"`
-	Subject             string          `json:"subject"`
-	Body                string          `json:"body"`
-	Attachments         []attachmentArg `json:"attachments"`
-	RemoveAttachmentIDs []int64         `json:"remove_attachment_ids"`
-	Status              string          `json:"status"`
-	Send                bool            `json:"send"`
-	IncludeAttachments  *bool           `json:"include_attachments"`
 }
 
 func draftToolDefs() []map[string]any {
@@ -77,17 +61,19 @@ func draftToolDefs() []map[string]any {
 	}
 	attachments := map[string]any{
 		"type": "array",
-		"description": "Files to attach, at most 20 MB together. Give each file either content_base64 " +
-			"or a public https url the server downloads it from.",
+		"description": "Files to attach, at most 20 MB together. Give each file one of upload_id, " +
+			"url or content_base64. For a local file do not inline it as base64: get a REST token " +
+			"with the token tool, upload it with curl -F file=@x.pdf to the uploads endpoint " +
+			"(see the api tool) and pass the upload_id it answers with.",
 		"items": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"filename":       str("File name as the recipient will see it, e.g. angebot.pdf."),
-				"content_base64": str("The file's bytes, base64-encoded."),
+				"filename":       str("File name as the recipient will see it, e.g. angebot.pdf. Optional with upload_id."),
+				"upload_id":      str("Id of a file uploaded through the REST API (POST /mcp/api/v1/uploads). Preferred for local files."),
+				"content_base64": str("The file's bytes, base64-encoded. Only for small generated files."),
 				"url":            str("Instead of content_base64: a public https URL to download the file from."),
 				"mime_type":      str("Optional. Detected from the bytes when left out."),
 			},
-			"required": []string{"filename"},
 		},
 	}
 	never := " This never sends anything: the draft waits in FreeScout until a person reviews and sends it."
@@ -213,139 +199,6 @@ func draftToolDefs() []map[string]any {
 	}
 }
 
-func isDraftTool(name string) bool {
-	switch name {
-	case "create_draft", "create_new_draft", "update_draft", "delete_draft",
-		"reply_to_conversation", "send_draft", "forward_conversation":
-		return true
-	}
-	return false
-}
-
-func (a *App) dispatchDraftTool(name string, rawArgs json.RawMessage, email string) map[string]any {
-	var args draftArgs
-	present := map[string]json.RawMessage{}
-	if len(rawArgs) > 0 {
-		if err := json.Unmarshal(rawArgs, &present); err != nil {
-			return toolError("arguments are not valid JSON: " + err.Error())
-		}
-		if err := json.Unmarshal(rawArgs, &args); err != nil {
-			return toolError("arguments: " + err.Error())
-		}
-	}
-
-	switch name {
-	case "create_draft":
-		if args.ID <= 0 || strings.TrimSpace(args.Body) == "" {
-			return toolError("id and body are required")
-		}
-		files, err := a.loadAttachments(args.Attachments)
-		if err != nil {
-			return toolError(err.Error())
-		}
-		payload := map[string]any{"body": args.Body, "cc": nonNil(args.Cc), "bcc": nonNil(args.Bcc)}
-		return a.toolResult(a.bridge.postDraft("conversations/"+strconv.FormatInt(args.ID, 10)+"/draft", payload, files, email))
-
-	case "create_new_draft":
-		if args.MailboxID <= 0 || len(args.To) == 0 || strings.TrimSpace(args.Subject) == "" || strings.TrimSpace(args.Body) == "" {
-			return toolError("mailbox_id, to, subject and body are required")
-		}
-		files, err := a.loadAttachments(args.Attachments)
-		if err != nil {
-			return toolError(err.Error())
-		}
-		payload := map[string]any{
-			"mailbox_id": args.MailboxID, "to": nonNil(args.To), "cc": nonNil(args.Cc), "bcc": nonNil(args.Bcc),
-			"subject": args.Subject, "body": args.Body,
-		}
-		return a.toolResult(a.bridge.postDraft("drafts", payload, files, email))
-
-	case "update_draft":
-		if args.DraftID <= 0 {
-			return toolError("draft_id is required")
-		}
-		files, err := a.loadAttachments(args.Attachments)
-		if err != nil {
-			return toolError(err.Error())
-		}
-		// Only what was passed, so the bridge can tell "leave it" from "empty it".
-		payload := map[string]any{}
-		if _, ok := present["body"]; ok {
-			if strings.TrimSpace(args.Body) == "" {
-				return toolError("body cannot be empty; use delete_draft to discard the draft")
-			}
-			payload["body"] = args.Body
-		}
-		if _, ok := present["subject"]; ok {
-			payload["subject"] = args.Subject
-		}
-		for key, list := range map[string]emailList{"to": args.To, "cc": args.Cc, "bcc": args.Bcc} {
-			if _, ok := present[key]; ok {
-				payload[key] = nonNil(list)
-			}
-		}
-		if len(args.RemoveAttachmentIDs) > 0 {
-			payload["remove_attachment_ids"] = args.RemoveAttachmentIDs
-		}
-		if len(payload) == 0 && len(files) == 0 {
-			return toolError("nothing to change")
-		}
-		return a.toolResult(a.bridge.postDraft("drafts/"+strconv.FormatInt(args.DraftID, 10), payload, files, email))
-
-	case "reply_to_conversation":
-		if args.ID <= 0 || strings.TrimSpace(args.Body) == "" {
-			return toolError("id and body are required")
-		}
-		files, err := a.loadAttachments(args.Attachments)
-		if err != nil {
-			return toolError(err.Error())
-		}
-		payload := map[string]any{"body": args.Body, "cc": nonNil(args.Cc), "bcc": nonNil(args.Bcc)}
-		if args.Status != "" {
-			payload["status"] = args.Status
-		}
-		return a.toolResult(a.bridge.postDraft("conversations/"+strconv.FormatInt(args.ID, 10)+"/reply", payload, files, email))
-
-	case "send_draft":
-		if args.DraftID <= 0 {
-			return toolError("draft_id is required")
-		}
-		payload := map[string]any{}
-		if args.Status != "" {
-			payload["status"] = args.Status
-		}
-		return a.toolResult(a.bridge.post("drafts/"+strconv.FormatInt(args.DraftID, 10)+"/send", payload, email))
-
-	case "forward_conversation":
-		if args.ID <= 0 || len(args.To) == 0 {
-			return toolError("id and to are required")
-		}
-		if args.Send && len(args.To) != 1 {
-			return toolError("forward to exactly one address when send is true")
-		}
-		if args.Send && len(args.Attachments) > 0 {
-			return toolError("extra attachments only on a forward draft (send=false)")
-		}
-		files, err := a.loadAttachments(args.Attachments)
-		if err != nil {
-			return toolError(err.Error())
-		}
-		include := args.IncludeAttachments == nil || *args.IncludeAttachments
-		payload := map[string]any{
-			"to": nonNil(args.To), "cc": nonNil(args.Cc), "bcc": nonNil(args.Bcc), "body": args.Body,
-			"send": args.Send, "include_attachments": include,
-		}
-		return a.toolResult(a.bridge.postDraft("conversations/"+strconv.FormatInt(args.ID, 10)+"/forward", payload, files, email))
-
-	case "delete_draft":
-		if args.DraftID <= 0 {
-			return toolError("draft_id is required")
-		}
-		return a.toolResult(a.bridge.post("drafts/"+strconv.FormatInt(args.DraftID, 10)+"/delete", map[string]any{}, email))
-	}
-	return toolError("unknown tool: " + name)
-}
-
 func nonNil(list emailList) []string {
 	if list == nil {
 		return []string{}
@@ -359,36 +212,66 @@ type draftFile struct {
 	Data     []byte
 }
 
-// loadAttachments decodes or downloads every file before the bridge is
-// called, so a bad file fails the call without leaving half a draft.
-func (a *App) loadAttachments(list []attachmentArg) ([]draftFile, error) {
-	if len(list) > maxDraftAttachments {
-		return nil, fmt.Errorf("at most %d attachments per draft", maxDraftAttachments)
+// loadAttachments decodes, downloads or fetches from the upload store every
+// file named in list, and appends the files that came as real uploads. It
+// returns the upload ids it used, for the caller to delete after success.
+func (a *App) loadAttachments(list []attachmentArg, uploaded []draftFile, email string) ([]draftFile, []string, error) {
+	if len(list)+len(uploaded) > maxDraftAttachments {
+		return nil, nil, fmt.Errorf("at most %d attachments per draft", maxDraftAttachments)
 	}
-	files := make([]draftFile, 0, len(list))
+	files := make([]draftFile, 0, len(list)+len(uploaded))
+	var used []string
 	total := 0
+	for _, f := range uploaded {
+		if len(f.Data) == 0 {
+			return nil, nil, fmt.Errorf("%s is empty", f.Name)
+		}
+		total += len(f.Data)
+		if total > maxDraftAttachmentBytes {
+			return nil, nil, fmt.Errorf("attachments are larger than %d MB together", maxDraftAttachmentBytes>>20)
+		}
+		files = append(files, f)
+	}
 	for i, item := range list {
 		name := strings.TrimSpace(item.Filename)
-		if name == "" {
-			return nil, fmt.Errorf("attachment %d has no filename", i+1)
+		uploadID := strings.TrimSpace(item.UploadID)
+		hasData, hasURL, hasUpload := item.ContentBase64 != "", strings.TrimSpace(item.URL) != "", uploadID != ""
+		if name == "" && !hasUpload {
+			return nil, nil, fmt.Errorf("attachment %d has no filename", i+1)
 		}
-		hasData, hasURL := item.ContentBase64 != "", strings.TrimSpace(item.URL) != ""
-		if hasData == hasURL {
-			return nil, fmt.Errorf("%s: give either content_base64 or url", name)
+		label := name
+		if label == "" {
+			label = uploadID
+		}
+		if n := btoi(hasData) + btoi(hasURL) + btoi(hasUpload); n != 1 {
+			return nil, nil, fmt.Errorf("%s: give exactly one of upload_id, url or content_base64", label)
 		}
 
 		var data []byte
 		mimeType := strings.TrimSpace(item.MimeType)
-		if hasData {
+		if hasUpload {
+			up, content, err := a.uploads.read(email, uploadID)
+			if err != nil {
+				return nil, nil, err
+			}
+			data = content
+			if name == "" {
+				name = up.Name
+			}
+			if mimeType == "" {
+				mimeType = up.MimeType
+			}
+			used = append(used, uploadID)
+		} else if hasData {
 			decoded, err := decodeBase64(item.ContentBase64)
 			if err != nil {
-				return nil, fmt.Errorf("%s is not valid base64", name)
+				return nil, nil, fmt.Errorf("%s is not valid base64", name)
 			}
 			data = decoded
 		} else {
 			downloaded, contentType, err := a.downloadAttachment(strings.TrimSpace(item.URL), maxDraftAttachmentBytes-total)
 			if err != nil {
-				return nil, fmt.Errorf("%s: %v", name, err)
+				return nil, nil, fmt.Errorf("%s: %v", name, err)
 			}
 			data = downloaded
 			if mimeType == "" {
@@ -396,15 +279,22 @@ func (a *App) loadAttachments(list []attachmentArg) ([]draftFile, error) {
 			}
 		}
 		if len(data) == 0 {
-			return nil, fmt.Errorf("%s is empty", name)
+			return nil, nil, fmt.Errorf("%s is empty", name)
 		}
 		total += len(data)
 		if total > maxDraftAttachmentBytes {
-			return nil, fmt.Errorf("attachments are larger than %d MB together", maxDraftAttachmentBytes>>20)
+			return nil, nil, fmt.Errorf("attachments are larger than %d MB together", maxDraftAttachmentBytes>>20)
 		}
 		files = append(files, draftFile{Name: name, MimeType: mimeType, Data: data})
 	}
-	return files, nil
+	return files, used, nil
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // Models wrap long base64 and sometimes use the URL alphabet or drop padding.

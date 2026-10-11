@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -407,7 +408,8 @@ func TestToolsListOffersTheWholeSurface(t *testing.T) {
 	for _, want := range []string{"list_mailboxes", "search_conversations", "get_conversation",
 		"reply_to_conversation", "add_note", "set_status", "assign_conversation",
 		"create_draft", "create_new_draft", "update_draft", "delete_draft",
-		"send_draft", "forward_conversation", "find_customers", "move_conversation", "merge_conversations"} {
+		"send_draft", "forward_conversation", "find_customers", "move_conversation", "merge_conversations",
+		"token", "api"} {
 		if !found[want] {
 			t.Fatalf("tool %s missing from tools/list", want)
 		}
@@ -891,7 +893,7 @@ func TestReplyDraftIsAFreeScoutDraftAndNothingIsSent(t *testing.T) {
 
 	// get_conversation shows it as a draft, with its id for update_draft.
 	conversation := callTool(t, "get_conversation", map[string]any{"id": id})
-	if !strings.Contains(conversation, `"draft": true`) || !strings.Contains(conversation, "anbei das Angebot.") {
+	if !strings.Contains(conversation, `"draft":true`) || !strings.Contains(conversation, "anbei das Angebot.") {
 		t.Fatalf("get_conversation does not show the draft: %s", truncate(conversation))
 	}
 
@@ -1338,7 +1340,7 @@ func TestSearchFindsMessageTextAndFilters(t *testing.T) {
 		{"before": "2000-01-01"},
 		{"query": "Dach", "status": "spam"},
 	} {
-		if got := callTool(t, "search_conversations", args); !strings.Contains(got, `"total": 0`) {
+		if got := callTool(t, "search_conversations", args); !strings.Contains(got, `"total":0`) {
 			t.Fatalf("%v should match nothing: %s", args, truncate(got))
 		}
 	}
@@ -1389,5 +1391,185 @@ func TestMergeConversations(t *testing.T) {
 	}
 	if got := queryInt(t, fmt.Sprintf("select count(*) from threads where conversation_id = %d and body like '%%Rechnung zum Dach%%'", fixture.ConversationID)); got != 1 || threads < 1 {
 		t.Fatalf("the merged messages did not move over")
+	}
+}
+
+// ---- REST API ----------------------------------------------------------------
+
+const apiURL = mcpURL + "/mcp/api/v1"
+
+// restToken is what a client with a shell does first: ask the token tool.
+func restToken(t *testing.T) string {
+	t.Helper()
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(callTool(t, "token", map[string]any{})), &out); err != nil || out.Token == "" {
+		t.Fatalf("the token tool gave no token")
+	}
+	return out.Token
+}
+
+func rest(t *testing.T, method, path, token string, body io.Reader, contentType string) (int, []byte) {
+	t.Helper()
+	req, _ := http.NewRequest(method, apiURL+path, body)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(res.Body)
+	return res.StatusCode, raw
+}
+
+// form builds what curl -F sends.
+func form(t *testing.T, fields [][2]string, files map[string][]byte) (io.Reader, string) {
+	t.Helper()
+	var buf strings.Builder
+	w := multipart.NewWriter(&buf)
+	for _, f := range fields {
+		_ = w.WriteField(f[0], f[1])
+	}
+	for name, data := range files {
+		part, _ := w.CreateFormFile("file", name)
+		_, _ = part.Write(data)
+	}
+	_ = w.Close()
+	return strings.NewReader(buf.String()), w.FormDataContentType()
+}
+
+func TestRestDraftWithPdfLandsInFreeScout(t *testing.T) {
+	fixture := seeded(t)
+	token := restToken(t)
+	mailBefore := outgoingMail(t)
+	pdf := []byte("%PDF-1.4\n% Angebot per REST\n")
+
+	body, ct := form(t, [][2]string{{"body", "Guten Tag,\n\nanbei das Angebot per REST."}, {"cc", "statik@example.org"}},
+		map[string][]byte{"angebot-rest.pdf": pdf})
+	status, raw := rest(t, "POST", fmt.Sprintf("/conversations/%d/drafts", fixture.ConversationID), token, body, ct)
+	if status != 201 {
+		t.Fatalf("POST drafts: HTTP %d %s", status, raw)
+	}
+	var draft draftResult
+	if err := json.Unmarshal(raw, &draft); err != nil || draft.Draft.DraftID <= 0 || len(draft.Draft.Attachments) != 1 {
+		t.Fatalf("unexpected answer: %s", raw)
+	}
+	a := draft.Draft.Attachments[0]
+	if row := query(t, fmt.Sprintf("select thread_id, name, mime_type from attachments where id = %d", a.ID)); row != fmt.Sprintf("%d\tangebot-rest.pdf\tapplication/pdf", draft.Draft.DraftID) {
+		t.Fatalf("attachment not stored on the draft: %q", row)
+	}
+	if state := queryInt(t, fmt.Sprintf("select state from threads where id = %d", draft.Draft.DraftID)); state != stateDraft {
+		t.Fatalf("thread state %d", state)
+	}
+
+	// The file comes back byte for byte, as a file.
+	status, got := rest(t, "GET", fmt.Sprintf("/attachments/%d", a.ID), token, nil, "")
+	if status != 200 || string(got) != string(pdf) {
+		t.Fatalf("download: HTTP %d %q", status, got)
+	}
+
+	// Upload first, attach by id through the MCP tool: the way for a client
+	// that talks MCP but can run curl.
+	body, ct = form(t, nil, map[string][]byte{"plaene.pdf": []byte("%PDF-1.4\n% Pläne\n")})
+	status, raw = rest(t, "POST", "/uploads", token, body, ct)
+	if status != 201 {
+		t.Fatalf("upload: HTTP %d %s", status, raw)
+	}
+	uploadID := between(string(raw), `"upload_id":"`, `"`)
+	updated := callDraftTool(t, "update_draft", map[string]any{
+		"draft_id": draft.Draft.DraftID, "attachments": []map[string]any{{"upload_id": uploadID}},
+	})
+	if len(updated.Draft.Attachments) != 2 {
+		t.Fatalf("the uploaded file was not attached: %+v", updated.Draft.Attachments)
+	}
+	callToolExpectingError(t, "update_draft", map[string]any{
+		"draft_id": draft.Draft.DraftID, "attachments": []map[string]any{{"upload_id": uploadID}},
+	})
+
+	if status, raw := rest(t, "DELETE", fmt.Sprintf("/drafts/%d", draft.Draft.DraftID), token, nil, ""); status != 200 {
+		t.Fatalf("delete: HTTP %d %s", status, raw)
+	}
+	if outgoingMail(t) != mailBefore {
+		t.Fatalf("a REST draft sent mail")
+	}
+}
+
+func TestRestNewDraftAndSearch(t *testing.T) {
+	fixture := seeded(t)
+	token := restToken(t)
+	body, ct := form(t, [][2]string{
+		{"mailbox_id", strconv.Itoa(fixture.MailboxID)}, {"to", "bauamt@example.org"},
+		{"subject", "Bauantrag per REST"}, {"body", "Sehr geehrte Damen und Herren"},
+	}, map[string][]byte{"antrag.pdf": []byte("%PDF-1.4\n% Antrag\n")})
+	status, raw := rest(t, "POST", "/drafts", token, body, ct)
+	if status != 201 {
+		t.Fatalf("POST /drafts: HTTP %d %s", status, raw)
+	}
+	var draft draftResult
+	_ = json.Unmarshal(raw, &draft)
+	if !draft.Draft.NewConversation || len(draft.Draft.Attachments) != 1 {
+		t.Fatalf("unexpected answer: %s", raw)
+	}
+
+	status, raw = rest(t, "GET", "/conversations?state=draft&fields=subject", token, nil, "")
+	if status != 200 || !strings.Contains(string(raw), "Bauantrag per REST") || strings.Contains(string(raw), "preview") {
+		t.Fatalf("search: HTTP %d %s", status, raw)
+	}
+	rest(t, "DELETE", fmt.Sprintf("/drafts/%d", draft.Draft.DraftID), token, nil, "")
+}
+
+func TestRestRefusesBadTokensAndForeignDrafts(t *testing.T) {
+	fixture := seeded(t)
+
+	if status, _ := rest(t, "GET", "/mailboxes", "", nil, ""); status != 401 {
+		t.Fatalf("no token: HTTP %d", status)
+	}
+	// Signed with the right key but expired, and a current one with the wrong key.
+	sign := func(key string, expires time.Time) string {
+		claims, _ := json.Marshal(map[string]any{"k": "api", "s": "post@levinkeller.de", "c": clientID, "sc": "mcp", "e": expires.UnixMilli(), "n": "x"})
+		body := "fs1." + base64.RawURLEncoding.EncodeToString(claims)
+		mac := hmac.New(sha256.New, []byte(key))
+		mac.Write([]byte(body))
+		return body + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	}
+	if status, _ := rest(t, "GET", "/mailboxes", sign(signingKey, time.Now().Add(-time.Minute)), nil, ""); status != 401 {
+		t.Fatalf("expired token: HTTP %d", status)
+	}
+	if status, _ := rest(t, "GET", "/mailboxes", sign("a-different-key-that-is-long-enough-00", time.Now().Add(time.Hour)), nil, ""); status != 401 {
+		t.Fatalf("forged token: HTTP %d", status)
+	}
+	// The MCP access token is not a REST token.
+	if status, _ := rest(t, "GET", "/mailboxes", connect(t), nil, ""); status != 401 {
+		t.Fatalf("MCP access token accepted: HTTP %d", status)
+	}
+
+	token := restToken(t)
+	if status, raw := rest(t, "GET", "/mailboxes", token, nil, ""); status != 200 || !strings.Contains(string(raw), "Ökohaus") {
+		t.Fatalf("mailboxes: HTTP %d %s", status, raw)
+	}
+	status, raw := rest(t, "PATCH", fmt.Sprintf("/drafts/%d", fixture.ColleagueDraft), token, strings.NewReader(`{"body":"überschrieben"}`), "application/json")
+	if status < 400 || status >= 500 || !strings.Contains(string(raw), "someone else") {
+		t.Fatalf("a colleague's draft was writable: HTTP %d %s", status, raw)
+	}
+	if body := query(t, fmt.Sprintf("select body from threads where id = %d", fixture.ColleagueDraft)); body != "Entwurf der Kollegin" {
+		t.Fatalf("the colleague's draft was changed: %q", body)
+	}
+
+	big, ct := form(t, [][2]string{{"body", "x"}}, map[string][]byte{"gross.bin": make([]byte, 21<<20)})
+	if status, _ := rest(t, "POST", fmt.Sprintf("/conversations/%d/drafts", fixture.ConversationID), token, big, ct); status != 413 {
+		t.Fatalf("21 MB: HTTP %d", status)
+	}
+}
+
+func TestOpenAPIIsPublic(t *testing.T) {
+	status, raw := rest(t, "GET", "/openapi.json", "", nil, "")
+	if status != 200 || !strings.Contains(string(raw), `"openapi":"3.0.3"`) || !strings.Contains(string(raw), "/conversations/{id}/drafts") {
+		t.Fatalf("openapi.json: HTTP %d %s", status, truncate(string(raw)))
 	}
 }

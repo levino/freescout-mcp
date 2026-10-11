@@ -3,9 +3,8 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"net/url"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -24,7 +23,8 @@ func toolDefs() []map[string]any {
 			"name": "search_conversations",
 			"description": "Search conversations, newest reply first, with the same search FreeScout's own " +
 				"search page uses. Use it to find a thread before reading or answering it. Without " +
-				"arguments it returns the most recent conversations.",
+				"arguments it returns the most recent conversations. Returns a compact hit list; " +
+				"for bulk work use the REST API (see the api tool).",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -38,16 +38,22 @@ func toolDefs() []map[string]any {
 					"state":      map[string]any{"type": "string", "enum": []string{"published", "draft"}, "description": "draft lists unsent new-email drafts instead of real conversations. Default published."},
 					"limit":      num("How many to return, 1-100, default 25."),
 					"offset":     num("Skip this many results, for paging."),
+					"fields":     fieldsArg("Fields per hit besides id. Default: number, subject, status, customer_email, last_reply_at, draft, mailbox_id. Also available: assignee, threads_count, last_reply_from, preview, url."),
 				},
 			},
 		},
 		{
-			"name":        "get_conversation",
-			"description": "Read one conversation with its full message history, including internal notes.",
+			"name": "get_conversation",
+			"description": "Read one conversation with its message history, including internal notes. " +
+				"Pass last_threads to read only the newest messages of a long thread.",
 			"inputSchema": map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"id": num("Conversation id from search_conversations.")},
-				"required":   []string{"id"},
+				"type": "object",
+				"properties": map[string]any{
+					"id":           num("Conversation id from search_conversations."),
+					"last_threads": num("Only this many of the newest messages. Default: all."),
+					"fields":       fieldsArg("Only these fields of the conversation besides id, e.g. [\"subject\",\"threads\"]."),
+				},
+				"required": []string{"id"},
 			},
 		},
 		{
@@ -77,7 +83,8 @@ func toolDefs() []map[string]any {
 		{
 			"name": "get_attachment",
 			"description": "Download one attachment. Images come back as an image, text as text, " +
-				"anything else as a file the client can save. Attachment ids come from get_conversation.",
+				"anything else as a file the client can save. Attachment ids come from get_conversation. " +
+				"With a shell, downloading through the REST API (see the api tool) saves the tokens of the base64.",
 			"inputSchema": map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"id": num("Attachment id from get_conversation.")},
@@ -134,130 +141,98 @@ func toolDefs() []map[string]any {
 			},
 		},
 	)
-	return append(defs, draftToolDefs()...)
+	defs = append(defs, draftToolDefs()...)
+	return append(defs,
+		map[string]any{
+			"name": "token",
+			"description": "Get a bearer token for the REST API, valid for one hour, acting as you. " +
+				"Use the REST API instead of these tools whenever you can run curl: to attach local " +
+				"files (multipart upload instead of base64), download attachments, or work through many " +
+				"conversations. Call the api tool once for the endpoints and curl examples. Never show " +
+				"the token to anyone else; it carries your helpdesk rights.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+		map[string]any{
+			"name":        "api",
+			"description": "Short guide to the REST API: endpoints, the OpenAPI document and curl examples.",
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+	)
 }
 
-type toolArgs struct {
-	ID            int64   `json:"id"`
-	Query         string  `json:"query"`
-	After         string  `json:"after"`
-	Before        string  `json:"before"`
-	From          string  `json:"from"`
-	To            string  `json:"to"`
-	State         string  `json:"state"`
-	MergeIDs      []int64 `json:"merge_ids"`
-	Status        string  `json:"status"`
-	MailboxID     int64   `json:"mailbox_id"`
-	Limit         int64   `json:"limit"`
-	Offset        int64   `json:"offset"`
-	Body          string  `json:"body"`
-	AssigneeEmail string  `json:"assignee_email"`
+func fieldsArg(desc string) map[string]any {
+	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
 }
 
+// dispatchTool answers tools/call for the user behind the MCP session.
 func (a *App) dispatchTool(name string, rawArgs json.RawMessage, email string) map[string]any {
-	if isDraftTool(name) {
-		return a.dispatchDraftTool(name, rawArgs, email)
-	}
+	return a.dispatchToolFor(name, rawArgs, &tokenClaims{Subject: email, Scope: defaultScope})
+}
 
-	var args toolArgs
-	if len(rawArgs) > 0 {
-		if err := json.Unmarshal(rawArgs, &args); err != nil {
-			return toolError("arguments are not valid JSON: " + err.Error())
-		}
-	}
-
+func (a *App) dispatchToolFor(name string, rawArgs json.RawMessage, session *tokenClaims) map[string]any {
+	email := session.Subject
 	switch name {
-	case "list_mailboxes":
-		return a.toolResult(a.bridge.get("mailboxes", nil, email))
-
-	case "search_conversations":
-		q := url.Values{}
-		if args.Query != "" {
-			q.Set("query", args.Query)
-		}
-		if args.Status != "" {
-			q.Set("status", args.Status)
-		}
-		if args.MailboxID > 0 {
-			q.Set("mailbox_id", strconv.FormatInt(args.MailboxID, 10))
-		}
-		if args.Limit > 0 {
-			q.Set("limit", strconv.FormatInt(args.Limit, 10))
-		}
-		if args.Offset > 0 {
-			q.Set("offset", strconv.FormatInt(args.Offset, 10))
-		}
-		for key, value := range map[string]string{"after": args.After, "before": args.Before, "from": args.From, "to": args.To, "state": args.State} {
-			if value = strings.TrimSpace(value); value != "" {
-				q.Set(key, value)
-			}
-		}
-		return a.toolResult(a.bridge.get("conversations", q, email))
-
-	case "get_conversation":
-		if args.ID <= 0 {
-			return toolError("id is required")
-		}
-		return a.toolResult(a.bridge.get("conversations/"+strconv.FormatInt(args.ID, 10), nil, email))
-
+	case "token":
+		return a.tokenTool(session)
+	case "api":
+		return textResult(a.apiGuide())
 	case "get_attachment":
-		if args.ID <= 0 {
-			return toolError("id is required")
-		}
-		payload, err := a.bridge.get("attachments/"+strconv.FormatInt(args.ID, 10), nil, email)
+		payload, err := a.operation(name, rawArgs, nil, email)
 		if err != nil {
 			return a.toolResult(nil, err)
 		}
 		return attachmentResult(payload)
-
-	case "add_note":
-		if args.ID <= 0 || strings.TrimSpace(args.Body) == "" {
-			return toolError("id and body are required")
+	case "search_conversations":
+		// A compact hit list unless the caller asks for more: every token
+		// spent on a preview nobody reads is one less for the work.
+		if !hasArg(rawArgs, "fields") {
+			rawArgs = withArg(rawArgs, "fields", compactSearchFields)
 		}
-		return a.toolResult(a.bridge.post("conversations/"+strconv.FormatInt(args.ID, 10)+"/note",
-			map[string]any{"body": args.Body}, email))
-
-	case "set_status":
-		if args.ID <= 0 || args.Status == "" {
-			return toolError("id and status are required")
-		}
-		return a.toolResult(a.bridge.post("conversations/"+strconv.FormatInt(args.ID, 10)+"/status",
-			map[string]any{"status": args.Status}, email))
-
-	case "assign_conversation":
-		if args.ID <= 0 {
-			return toolError("id is required")
-		}
-		return a.toolResult(a.bridge.post("conversations/"+strconv.FormatInt(args.ID, 10)+"/assign",
-			map[string]any{"assignee_email": args.AssigneeEmail}, email))
-
-	case "find_customers":
-		if len(strings.TrimSpace(args.Query)) < 2 {
-			return toolError("query needs at least two characters")
-		}
-		return a.toolResult(a.bridge.get("customers", url.Values{"query": {strings.TrimSpace(args.Query)}}, email))
-
-	case "move_conversation":
-		if args.ID <= 0 || args.MailboxID <= 0 {
-			return toolError("id and mailbox_id are required")
-		}
-		return a.toolResult(a.bridge.post("conversations/"+strconv.FormatInt(args.ID, 10)+"/move",
-			map[string]any{"mailbox_id": args.MailboxID}, email))
-
-	case "merge_conversations":
-		if args.ID <= 0 || len(args.MergeIDs) == 0 {
-			return toolError("id and merge_ids are required")
-		}
-		return a.toolResult(a.bridge.post("conversations/"+strconv.FormatInt(args.ID, 10)+"/merge",
-			map[string]any{"merge_ids": args.MergeIDs}, email))
-
-	default:
+	}
+	if !knownTool(name) {
 		return toolError("unknown tool: " + name)
 	}
+	return a.toolResult(a.operation(name, rawArgs, nil, email))
+}
+
+var compactSearchFields = []string{"number", "subject", "status", "customer_email", "last_reply_at", "draft", "mailbox_id"}
+
+func knownTool(name string) bool {
+	for _, def := range toolDefs() {
+		if def["name"] == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasArg(raw json.RawMessage, key string) bool {
+	m := map[string]json.RawMessage{}
+	_ = json.Unmarshal(raw, &m)
+	_, ok := m[key]
+	return ok
+}
+
+func withArg(raw json.RawMessage, key string, value any) json.RawMessage {
+	m := map[string]any{}
+	if len(raw) > 0 && json.Unmarshal(raw, &m) != nil {
+		return raw // let operation report the broken JSON
+	}
+	m[key] = value
+	out, _ := json.Marshal(m)
+	return out
+}
+
+func textResult(text string) map[string]any {
+	return map[string]any{"content": []map[string]any{{"type": "text", "text": text}}}
 }
 
 func (a *App) toolResult(payload map[string]any, err error) map[string]any {
 	if err != nil {
+		var ie *inputError
+		if errors.As(err, &ie) {
+			return toolError(ie.msg)
+		}
 		var be *bridgeError
 		if asBridgeError(err, &be) {
 			return toolError(be.Message)
@@ -265,13 +240,12 @@ func (a *App) toolResult(payload map[string]any, err error) map[string]any {
 		logJSON("error", "bridge call failed", map[string]any{"err": err.Error()})
 		return toolError("the helpdesk did not answer")
 	}
-	pretty, err := json.MarshalIndent(payload, "", "  ")
+	// Compact, not indented: the model reads JSON fine without the spaces.
+	text, err := json.Marshal(payload)
 	if err != nil {
 		return toolError("could not encode result")
 	}
-	return map[string]any{
-		"content": []map[string]any{{"type": "text", "text": string(pretty)}},
-	}
+	return textResult(string(text))
 }
 
 func toolError(message string) map[string]any {

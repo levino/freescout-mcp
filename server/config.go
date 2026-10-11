@@ -22,6 +22,9 @@ type Config struct {
 
 	AppName string
 
+	// Temporary REST uploads; emptied on start. Default: $TMPDIR/freescout-mcp-uploads.
+	UploadDir string
+
 	InsecureAllowLocalClients bool
 }
 
@@ -37,6 +40,7 @@ func LoadConfig() (*Config, error) {
 		OIDCScopes:       env("OIDC_SCOPES", "openid profile email"),
 		SigningKey:       []byte(env("TOKEN_SIGNING_KEY", "")),
 		AppName:          env("APP_NAME", "FreeScout"),
+		UploadDir:        env("UPLOAD_DIR", ""),
 
 		InsecureAllowLocalClients: env("INSECURE_ALLOW_LOCAL_CLIENTS", "") == "true",
 	}
