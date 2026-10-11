@@ -1461,7 +1461,7 @@ func TestRestDraftWithPdfLandsInFreeScout(t *testing.T) {
 		t.Fatalf("unexpected answer: %s", raw)
 	}
 	a := draft.Draft.Attachments[0]
-	if row := query(t, fmt.Sprintf("select thread_id, name, mime_type from attachments where id = %d", a.ID)); row != fmt.Sprintf("%d\tangebot-rest.pdf\tapplication/pdf", draft.Draft.DraftID) {
+	if row := query(t, fmt.Sprintf("select thread_id, file_name, mime_type from attachments where id = %d", a.ID)); row != fmt.Sprintf("%d\tangebot-rest.pdf\tapplication/pdf", draft.Draft.DraftID) {
 		t.Fatalf("attachment not stored on the draft: %q", row)
 	}
 	if state := queryInt(t, fmt.Sprintf("select state from threads where id = %d", draft.Draft.DraftID)); state != stateDraft {
