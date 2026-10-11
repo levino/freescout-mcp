@@ -4,11 +4,15 @@ namespace Modules\Mcp\Http\Controllers;
 
 use App\Attachment;
 use App\Conversation;
+use App\Events\UserCreatedConversationDraft;
+use App\Events\UserCreatedThreadDraft;
+use App\Folder;
 use App\Mailbox;
 use App\Thread;
 use App\User;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Modules\Mcp\Drafts;
 use Modules\Mcp\Text;
 
 class BridgeController extends Controller
@@ -102,9 +106,13 @@ class BridgeController extends Controller
         return response()->json([
             'conversation' => $this->summarize($conversation) + [
                 'threads' => $threads->map(function ($thread) {
+                    $isDraft = $thread->state == Thread::STATE_DRAFT;
+
                     return [
                         'id'          => $thread->id,
                         'type'        => $this->threadTypeName($thread->type),
+                        // An unsent draft; its id is the draft_id for update_draft.
+                        'draft'       => $isDraft,
                         'from'        => $thread->source_via == Thread::PERSON_USER ? 'user' : 'customer',
                         'author'      => $thread->created_by_user_id
                             ? optional(User::find($thread->created_by_user_id))->email
@@ -112,7 +120,11 @@ class BridgeController extends Controller
                         'created_at'  => (string) $thread->created_at,
                         'body'        => $this->toPlainText($thread->body),
                         'attachments' => $this->attachmentsOf($thread),
-                    ];
+                    ] + ($isDraft ? [
+                        'to'  => $thread->getToArray(),
+                        'cc'  => $thread->getCcArray(),
+                        'bcc' => $thread->getBccArray(),
+                    ] : []);
                 })->values(),
             ],
         ]);
@@ -210,6 +222,464 @@ class BridgeController extends Controller
         $conversation->mailbox->updateFoldersCounters();
 
         return response()->json(['ok' => true, 'conversation' => $this->summarize($conversation->fresh())]);
+    }
+
+    /**
+     * A reply that waits in FreeScout for a person to send it. Mirrors the
+     * reply branch of FreeScout's own `save_draft` (ConversationsController):
+     * a thread in STATE_DRAFT, the conversation in the Drafts folder, nothing
+     * queued for delivery.
+     */
+    public function createReplyDraft(Request $request, $id)
+    {
+        $conversation = $this->findConversation($request, $id);
+        if ($conversation instanceof \Illuminate\Http\JsonResponse) {
+            return $conversation;
+        }
+        $user = $this->actingUser($request);
+
+        if ($conversation->state != Conversation::STATE_PUBLISHED) {
+            return response()->json(['error' => 'this conversation is itself an unsent draft, change it with update_draft'], 422);
+        }
+
+        $input = $this->draftInput($request, ['body', 'cc', 'bcc', 'attachments']);
+        if ($input instanceof \Illuminate\Http\JsonResponse) {
+            return $input;
+        }
+        if ($input['body'] === '') {
+            return response()->json(['error' => 'empty body'], 422);
+        }
+
+        return $this->writeDraft(function () use ($conversation, $user, $input) {
+            $conversation->updateFolder();
+            $conversation->save();
+
+            $thread = new Thread();
+            $thread->conversation_id = $conversation->id;
+            $thread->user_id = $user->id;
+            $thread->type = Thread::TYPE_MESSAGE;
+            $thread->state = Thread::STATE_DRAFT;
+            $thread->source_via = Thread::PERSON_USER;
+            $thread->source_type = Thread::SOURCE_TYPE_WEB;
+            if ($conversation->customer_id) {
+                $thread->customer_id = $conversation->customer_id;
+            }
+            $thread->created_by_user_id = $user->id;
+            $thread->from = null;
+            $thread->body = $input['body'];
+            $thread->setTo($conversation->customer_email);
+            $thread->setCc($input['cc']);
+            $thread->setBcc($input['bcc']);
+            $thread->has_attachments = count($input['attachments']) > 0;
+            $thread->save();
+
+            $this->storeAttachments($input['attachments'], $thread, $user);
+
+            $conversation->addToFolder(Folder::TYPE_DRAFTS);
+            $conversation->mailbox->updateFoldersCounters(Folder::TYPE_DRAFTS);
+
+            event(new UserCreatedThreadDraft($conversation, $thread));
+
+            return $thread;
+        });
+    }
+
+    /**
+     * A new conversation that is not sent yet. Mirrors the "New Conversation"
+     * branch of `save_draft`: conversation and first thread both in
+     * STATE_DRAFT, recipients on the thread, no customer until it is sent.
+     */
+    public function createConversationDraft(Request $request)
+    {
+        $user = $this->actingUser($request);
+        if ($user instanceof \Illuminate\Http\JsonResponse) {
+            return $user;
+        }
+
+        $mailbox = Mailbox::find((int) ($this->draftPayload($request)['mailbox_id'] ?? 0));
+        if (!$mailbox) {
+            return response()->json(['error' => 'mailbox not found'], 404);
+        }
+        if (!$this->visibleMailboxes($user)->contains('id', $mailbox->id)) {
+            return response()->json(['error' => 'no access to this mailbox'], 403);
+        }
+
+        $input = $this->draftInput($request, ['to', 'cc', 'bcc', 'subject', 'body', 'attachments']);
+        if ($input instanceof \Illuminate\Http\JsonResponse) {
+            return $input;
+        }
+        if (!count($input['to'])) {
+            return response()->json(['error' => 'no recipient'], 422);
+        }
+        if ($input['subject'] === '') {
+            return response()->json(['error' => 'empty subject'], 422);
+        }
+        if ($input['body'] === '') {
+            return response()->json(['error' => 'empty body'], 422);
+        }
+        $hasAttachments = count($input['attachments']) > 0;
+
+        // One address is stored as a string, several as a list; on sending,
+        // FreeScout then offers one conversation per recipient.
+        $to = count($input['to']) == 1 ? $input['to'][0] : $input['to'];
+
+        return $this->writeDraft(function () use ($mailbox, $user, $input, $hasAttachments, $to) {
+            $conversation = new Conversation();
+            $conversation->type = Conversation::TYPE_EMAIL;
+            $conversation->state = Conversation::STATE_DRAFT;
+            $conversation->status = $this->newConversationStatus($mailbox);
+            $conversation->subject = $input['subject'];
+            $conversation->setPreview($input['body']);
+            if ($hasAttachments) {
+                $conversation->has_attachments = true;
+            }
+            $conversation->mailbox_id = $mailbox->id;
+            $conversation->customer_email = '';
+            $conversation->created_by_user_id = $user->id;
+            $conversation->source_via = Conversation::PERSON_USER;
+            $conversation->source_type = Conversation::SOURCE_TYPE_WEB;
+            $conversation->setCc($input['cc']);
+            $conversation->setBcc($input['bcc']);
+            $conversation->updateFolder();
+            $conversation->save();
+
+            $thread = new Thread();
+            $thread->conversation_id = $conversation->id;
+            $thread->user_id = $user->id;
+            $thread->first = true;
+            $thread->type = Thread::TYPE_MESSAGE;
+            $thread->state = Thread::STATE_DRAFT;
+            $thread->source_via = Thread::PERSON_USER;
+            $thread->source_type = Thread::SOURCE_TYPE_WEB;
+            $thread->created_by_user_id = $user->id;
+            $thread->from = null;
+            $thread->body = $input['body'];
+            $thread->setTo($to);
+            $thread->setCc($input['cc']);
+            $thread->setBcc($input['bcc']);
+            $thread->has_attachments = $hasAttachments;
+            $thread->save();
+
+            $this->storeAttachments($input['attachments'], $thread, $user);
+
+            $conversation->addToFolder(Folder::TYPE_DRAFTS);
+            $mailbox->updateFoldersCounters(Folder::TYPE_DRAFTS);
+
+            event(new UserCreatedConversationDraft($conversation, $thread));
+
+            return $thread;
+        });
+    }
+
+    /**
+     * Changes a draft the acting user wrote. Fields that are not given stay as
+     * they are; attachments are added, and removed by id.
+     */
+    public function updateDraft(Request $request, $id)
+    {
+        $thread = $this->findOwnDraft($request, $id);
+        if ($thread instanceof \Illuminate\Http\JsonResponse) {
+            return $thread;
+        }
+        $user = $this->actingUser($request);
+        $conversation = $thread->conversation;
+        $isNewConversation = $conversation->state == Conversation::STATE_DRAFT;
+
+        $fields = ['body', 'cc', 'bcc', 'attachments'];
+        if ($isNewConversation) {
+            $fields[] = 'to';
+            $fields[] = 'subject';
+        } elseif ($this->draftHas($request, 'to') || $this->draftHas($request, 'subject')) {
+            return response()->json(['error' => 'to and subject belong to the conversation, a reply draft only has body, cc, bcc and attachments'], 422);
+        }
+        $input = $this->draftInput($request, $fields);
+        if ($input instanceof \Illuminate\Http\JsonResponse) {
+            return $input;
+        }
+
+        $remove = $this->draftPayload($request)['remove_attachment_ids'] ?? [];
+        if (!is_array($remove)) {
+            return response()->json(['error' => 'remove_attachment_ids must be a list'], 422);
+        }
+        $remove = array_map('intval', $remove);
+        if (count($remove)) {
+            $own = Attachment::where('thread_id', $thread->id)->whereIn('id', $remove)->pluck('id')->all();
+            if (count($own) != count(array_unique($remove))) {
+                return response()->json(['error' => 'remove_attachment_ids names an attachment that is not on this draft'], 422);
+            }
+        }
+
+        if ($this->draftHas($request, 'body')) {
+            if ($input['body'] === '') {
+                return response()->json(['error' => 'empty body'], 422);
+            }
+            $thread->body = $input['body'];
+            if ($isNewConversation) {
+                $conversation->setPreview($input['body']);
+            }
+        }
+        if ($isNewConversation && $this->draftHas($request, 'to')) {
+            if (!count($input['to'])) {
+                return response()->json(['error' => 'no recipient'], 422);
+            }
+            $thread->setTo(count($input['to']) == 1 ? $input['to'][0] : $input['to']);
+        }
+        if ($isNewConversation && $this->draftHas($request, 'subject')) {
+            if ($input['subject'] === '') {
+                return response()->json(['error' => 'empty subject'], 422);
+            }
+            $conversation->subject = $input['subject'];
+        }
+        if ($this->draftHas($request, 'cc')) {
+            $thread->setCc($input['cc']);
+            if ($isNewConversation) {
+                $conversation->setCc($input['cc']);
+            }
+        }
+        if ($this->draftHas($request, 'bcc')) {
+            $thread->setBcc($input['bcc']);
+            if ($isNewConversation) {
+                $conversation->setBcc($input['bcc']);
+            }
+        }
+
+        return $this->writeDraft(function () use ($remove, $input, $thread, $user, $conversation, $isNewConversation) {
+            $this->storeAttachments($input['attachments'], $thread, $user);
+            // Last, because it removes files from disk, which no rollback undoes.
+            if (count($remove)) {
+                Attachment::deleteByIds($remove);
+            }
+
+            $hasAttachments = Attachment::where('thread_id', $thread->id)->where('embedded', false)->exists();
+            $thread->has_attachments = $hasAttachments;
+            $thread->save();
+            if ($isNewConversation) {
+                $conversation->has_attachments = $hasAttachments;
+            }
+            $conversation->save();
+
+            return $thread;
+        });
+    }
+
+    /**
+     * Discards a draft the acting user wrote, the way FreeScout's own
+     * `discard_draft` does: a new-conversation draft takes its conversation
+     * with it, a reply draft only itself.
+     */
+    public function deleteDraft(Request $request, $id)
+    {
+        $thread = $this->findOwnDraft($request, $id);
+        if ($thread instanceof \Illuminate\Http\JsonResponse) {
+            return $thread;
+        }
+        $user = $this->actingUser($request);
+        $conversation = $thread->conversation;
+        $mailbox = $conversation->mailbox;
+
+        if ($conversation->state == Conversation::STATE_DRAFT) {
+            $conversation->removeFromFolder(Folder::TYPE_DRAFTS);
+            $conversation->removeFromFolder(Folder::TYPE_STARRED, $user->id);
+            $mailbox->updateFoldersCounters(Folder::TYPE_DRAFTS);
+            $conversation->deleteThreads();
+            $conversation->delete();
+
+            Conversation::clearStarredByUserCache($user->id, $mailbox->id);
+            $mailbox->updateFoldersCounters(Folder::TYPE_STARRED);
+
+            return response()->json(['ok' => true, 'deleted' => 'conversation', 'conversation_id' => $conversation->id]);
+        }
+
+        $thread->deleteThread();
+        if ($conversation->maybeRemoveFromDrafts()) {
+            $mailbox->updateFoldersCounters(Folder::TYPE_DRAFTS);
+        }
+
+        return response()->json(['ok' => true, 'deleted' => 'draft', 'conversation_id' => $conversation->id]);
+    }
+
+    /**
+     * Runs the writes of a draft in one transaction, so a failure (a full
+     * disk, say) leaves no half draft behind.
+     */
+    protected function writeDraft(callable $write)
+    {
+        \DB::beginTransaction();
+        try {
+            $thread = $write();
+            \DB::commit();
+        } catch (\Throwable $e) {
+            \DB::rollBack();
+            \Log::error('[mcp] storing a draft failed: '.$e->getMessage());
+
+            return response()->json(['error' => 'the draft could not be stored'], 500);
+        }
+
+        return response()->json(['ok' => true, 'draft' => $this->describeDraft($thread->fresh())]);
+    }
+
+    protected function findOwnDraft(Request $request, $id)
+    {
+        $user = $this->actingUser($request);
+        if ($user instanceof \Illuminate\Http\JsonResponse) {
+            return $user;
+        }
+
+        $thread = Thread::find((int) $id);
+        if (!$thread || !$thread->conversation) {
+            return response()->json(['error' => 'draft not found'], 404);
+        }
+        if (!$this->visibleMailboxes($user)->contains('id', $thread->conversation->mailbox_id)) {
+            return response()->json(['error' => 'no access to this mailbox'], 403);
+        }
+        if ($thread->state != Thread::STATE_DRAFT) {
+            return response()->json(['error' => 'this is not a draft (any more), it may have been sent already'], 409);
+        }
+        if ((int) $thread->created_by_user_id !== (int) $user->id) {
+            return response()->json(['error' => 'this draft belongs to someone else'], 403);
+        }
+
+        return $thread;
+    }
+
+    /**
+     * Validates everything before anything is written, so a bad address or an
+     * oversized file never leaves half a draft behind.
+     */
+    protected function draftInput(Request $request, array $fields)
+    {
+        $payload = $this->draftPayload($request);
+        if ($payload === null) {
+            return response()->json(['error' => 'the draft fields did not arrive as JSON'], 422);
+        }
+
+        $input = ['body' => '', 'subject' => '', 'to' => [], 'cc' => [], 'bcc' => [], 'attachments' => []];
+        try {
+            foreach (['to', 'cc', 'bcc'] as $field) {
+                if (in_array($field, $fields, true)) {
+                    try {
+                        $input[$field] = Drafts::emails($payload[$field] ?? null);
+                    } catch (\InvalidArgumentException $e) {
+                        throw new \InvalidArgumentException($field.': '.$e->getMessage());
+                    }
+                }
+            }
+            if (in_array('attachments', $fields, true)) {
+                $input['attachments'] = $this->uploadedAttachments($request, $payload['attachments'] ?? []);
+            }
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['error' => $e->getMessage()], 422);
+        }
+        if (in_array('body', $fields, true)) {
+            $input['body'] = $this->bodyHtml($payload['body'] ?? '');
+        }
+        if (in_array('subject', $fields, true)) {
+            $subject = is_string($payload['subject'] ?? null) ? $payload['subject'] : '';
+            $input['subject'] = mb_substr(trim(preg_replace('/\s+/u', ' ', $subject)), 0, 998);
+        }
+
+        return $input;
+    }
+
+    /**
+     * Draft routes take multipart/form-data: the fields as JSON in `payload`,
+     * the files as `files[]`. Files arrive as real uploads, so PHP streams
+     * them to disk instead of holding megabytes of base64 in memory, and
+     * Attachment::create stores them exactly like an upload from the editor.
+     */
+    protected function draftPayload(Request $request)
+    {
+        $payload = json_decode((string) $request->input('payload', ''), true);
+
+        return is_array($payload) ? $payload : null;
+    }
+
+    protected function draftHas(Request $request, $field)
+    {
+        $payload = $this->draftPayload($request);
+
+        return is_array($payload) && array_key_exists($field, $payload);
+    }
+
+    protected function uploadedAttachments(Request $request, $meta)
+    {
+        $uploads = $request->file('files');
+        if ($uploads === null) {
+            $uploads = [];
+        } elseif (!is_array($uploads)) {
+            $uploads = [$uploads];
+        }
+        $uploads = array_values($uploads);
+
+        $sizes = [];
+        foreach ($uploads as $i => $upload) {
+            if (!$upload || !$upload->isValid()) {
+                throw new \InvalidArgumentException('file '.($i + 1).' did not arrive');
+            }
+            $sizes[] = (int) $upload->getSize();
+        }
+
+        $files = Drafts::attachments($meta, $sizes);
+        foreach ($files as $i => $file) {
+            $files[$i]['upload'] = $uploads[$i];
+            $files[$i]['mime_type'] = Drafts::mimeType($uploads[$i]->getMimeType(), $file['mime_type']);
+        }
+
+        return $files;
+    }
+
+    /**
+     * What FreeScout's upload does, minus the HTTP upload: Attachment::create
+     * writes the file to its disk (storage/app/attachment/…) and the row to
+     * `attachments`, here already bound to the draft thread.
+     */
+    protected function storeAttachments(array $files, Thread $thread, User $user)
+    {
+        foreach ($files as $file) {
+            $attachment = Attachment::create(
+                $file['name'],
+                $file['mime_type'],
+                null,
+                '',
+                $file['upload'],
+                false,
+                $thread->id,
+                $user->id
+            );
+            if (!$attachment) {
+                \Log::error('[mcp] storing attachment '.$file['name'].' for draft '.$thread->id.' failed');
+            }
+        }
+    }
+
+    protected function describeDraft(Thread $thread)
+    {
+        $conversation = $thread->conversation;
+
+        return [
+            'draft_id'         => $thread->id,
+            'conversation_id'  => $conversation->id,
+            'new_conversation' => $conversation->state == Conversation::STATE_DRAFT,
+            'mailbox_id'       => $conversation->mailbox_id,
+            'subject'          => $conversation->subject,
+            'to'               => $thread->getToArray(),
+            'cc'               => $thread->getCcArray(),
+            'bcc'              => $thread->getBccArray(),
+            'body'             => $this->toPlainText($thread->body),
+            'attachments'      => Attachment::where('thread_id', $thread->id)->orderBy('id')->get()->map(function ($attachment) {
+                return $this->describeAttachment($attachment);
+            })->values(),
+            'sent'             => false,
+            'url'              => $conversation->url(),
+        ];
+    }
+
+    protected function newConversationStatus(Mailbox $mailbox)
+    {
+        $status = (int) $mailbox->ticket_status;
+        $valid = [Conversation::STATUS_ACTIVE, Conversation::STATUS_PENDING, Conversation::STATUS_CLOSED];
+
+        return in_array($status, $valid, true) ? $status : Conversation::STATUS_ACTIVE;
     }
 
     protected function actingUser(Request $request)
@@ -335,6 +805,7 @@ class BridgeController extends Controller
             'last_reply_at'  => (string) $conversation->last_reply_at,
             'last_reply_from' => $conversation->last_reply_from == Conversation::PERSON_USER ? 'user' : 'customer',
             'preview'        => $this->toPlainText($conversation->preview),
+            'draft'          => $conversation->state == Conversation::STATE_DRAFT,
             'url'            => $conversation->url(),
         ];
     }

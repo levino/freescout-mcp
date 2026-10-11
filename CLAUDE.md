@@ -33,6 +33,13 @@ every configuration variable.
 - **Writes go through FreeScout.** A reply is `Conversation::createUserThread`,
   which fires `UserReplied` and with it the mail delivery, threading and folder
   counters. Never write threads in SQL.
+- **Drafts never send.** `create_draft`/`create_new_draft`/`update_draft`
+  mirror FreeScout's `save_draft`: `STATE_DRAFT` thread (and conversation for a
+  new email), Drafts folder, the `UserCreated…Draft` events — never
+  `createUserThread`, never `UserReplied`. Draft routes take multipart: fields
+  as JSON in `payload`, files as `files[]`, stored with `Attachment::create`
+  like an editor upload. Attachment URLs are fetched by the server with a
+  dialer that refuses non-public addresses at connect time.
 - **No auto-provisioning.** Both the MCP login and the web login refuse an
   address that has no active FreeScout user. Who gets into the helpdesk stays a
   decision made in the helpdesk.

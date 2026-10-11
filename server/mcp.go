@@ -2,12 +2,16 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 )
 
 const mcpProtocolVersion = "2025-06-18"
+
+// 20 MB of attachments are about 27 MB as base64, plus the rest of the call.
+const maxRPCBody = 32 << 20
 
 type jsonRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -70,7 +74,12 @@ func (a *App) mountMcp(mux *http.ServeMux) {
 			return
 		}
 
-		raw, _ := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+		// Drafts carry up to 20 MB of attachments as base64 inside the call.
+		raw, _ := io.ReadAll(io.LimitReader(r.Body, maxRPCBody+1))
+		if len(raw) > maxRPCBody {
+			writeJSON(w, 413, jsonRPCError(nil, -32600, fmt.Sprintf("request larger than %d MB", maxRPCBody>>20)))
+			return
+		}
 		var req jsonRPCRequest
 		if err := json.Unmarshal(raw, &req); err != nil {
 			writeJSON(w, 400, jsonRPCError(nil, -32700, "parse error"))

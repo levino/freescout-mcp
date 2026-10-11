@@ -13,5 +13,9 @@ Route::group([
     Route::post('conversations/{id}/note', 'BridgeController@note');
     Route::post('conversations/{id}/status', 'BridgeController@status');
     Route::post('conversations/{id}/assign', 'BridgeController@assign');
+    Route::post('conversations/{id}/draft', 'BridgeController@createReplyDraft');
+    Route::post('drafts', 'BridgeController@createConversationDraft');
+    Route::post('drafts/{id}', 'BridgeController@updateDraft');
+    Route::post('drafts/{id}/delete', 'BridgeController@deleteDraft');
     Route::get('attachments/{id}', 'BridgeController@attachment');
 });

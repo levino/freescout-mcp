@@ -14,7 +14,7 @@ func toolDefs() []map[string]any {
 	str := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 	num := func(desc string) map[string]any { return map[string]any{"type": "integer", "description": desc} }
 
-	return []map[string]any{
+	defs := []map[string]any{
 		{
 			"name":        "list_mailboxes",
 			"description": "List the shared mailboxes you have access to.",
@@ -47,8 +47,8 @@ func toolDefs() []map[string]any {
 		{
 			"name": "reply_to_conversation",
 			"description": "Send a reply to the customer. This really sends an email — do not call it " +
-				"to draft or to think out loud. The text is sent as written, so write it as the " +
-				"agent whose account is connected.",
+				"to draft or to think out loud; use create_draft for a reply a person should check first. " +
+				"The text is sent as written, so write it as the agent whose account is connected.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -106,6 +106,7 @@ func toolDefs() []map[string]any {
 			},
 		},
 	}
+	return append(defs, draftToolDefs()...)
 }
 
 type toolArgs struct {
@@ -120,6 +121,10 @@ type toolArgs struct {
 }
 
 func (a *App) dispatchTool(name string, rawArgs json.RawMessage, email string) map[string]any {
+	if isDraftTool(name) {
+		return a.dispatchDraftTool(name, rawArgs, email)
+	}
+
 	var args toolArgs
 	if len(rawArgs) > 0 {
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
