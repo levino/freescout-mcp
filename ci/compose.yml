@@ -19,7 +19,7 @@ services:
       retries: 60
 
   freescout:
-    image: nfrastack/freescout:2.2.10
+    image: nfrastack/freescout:2.2.21
     depends_on:
       mariadb:
         condition: service_healthy
